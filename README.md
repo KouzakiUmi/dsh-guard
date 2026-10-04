@@ -19,8 +19,8 @@
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.2 |
-| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.2 |
+| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.3 |
+| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.3 |
 
 业务存储逻辑只使用 `node:*`；配置声明使用宿主提供的官方 schema peer，设置写入走宿主 `settings` / `configEditor`，不捆绑另一套 DSH 核心，不另建配置文件。
 

@@ -84,18 +84,32 @@ export function extractReviewSources(events, options = {}) {
 
 /**
  * 待审动作。arguments 收成规范化 JSON 字符串。外层传输用 native，PTC 内层用 ptc-inner。
+ * native schema 来自本次模型请求头；只有 PTC 内层使用执行对象携带的绑定 schema。
  * @param {object} exec
+ * @param {{ tools?: readonly object[] } | undefined} requestHeader
  */
-export function pendingActionOf(exec) {
-  const schema = exec?.schema
-  if (schema === null || typeof schema !== 'object' || typeof schema.description !== 'string') {
-    throw new Error('pending tool schema is incomplete')
+export function pendingActionOf(exec, requestHeader) {
+  if (typeof exec?.name !== 'string' || exec.name.length === 0) throw new Error('pending tool name is missing')
+  const mode = exec.parent === undefined ? 'native' : 'ptc-inner'
+  const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  let schema
+  if (mode === 'native') {
+    const matches = (Array.isArray(requestHeader?.tools) ? requestHeader.tools : [])
+      .filter(value => isRecord(value) && value.name === exec.name)
+    if (matches.length !== 1) throw new Error('pending native tool schema is missing or ambiguous in request header')
+    schema = matches[0]
+  } else {
+    schema = exec.schema
+    if (!isRecord(schema) || schema.name !== exec.name) throw new Error('pending PTC binding schema is missing or inconsistent')
+  }
+  if (typeof schema.description !== 'string' || !isRecord(schema.parameters)) {
+    throw new Error(`pending ${mode} tool schema is incomplete`)
   }
   return {
-    mode: exec.parent === undefined ? 'native' : 'ptc-inner',
-    name: typeof exec.name === 'string' ? exec.name : '',
+    mode,
+    name: exec.name,
     description: schema.description,
-    parameters: schema.parameters ?? {},
+    parameters: schema.parameters,
     arguments: canonicalJson(exec.arguments),
   }
 }

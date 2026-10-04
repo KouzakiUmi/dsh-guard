@@ -29,7 +29,7 @@ let admitted, removed = 0, streamCalls = 0, requests = [], release
 const session = {
   mode: 'danger-full-access', policy: 'never', events: [], header: { cwd: temp },
   append(type, data) { this.events.push({ type, data }); if (type === 'sandbox/mode') this.mode = data.mode },
-  requestHeader() { return { config: { provider: 'session', model: 'session-model' } } }, snapshotEvents() { return [] },
+  requestHeader() { return { config: { provider: 'session', model: 'session-model' }, tools: [{ name: 'edit', description: 'edit', parameters: { type: 'object' } }] } }, snapshotEvents() { return [] },
 }
 const services = {
   profileContext: profile, tools: {}, approval: { overrideOf: () => session.policy }, sessions: { list: () => [session] },
@@ -73,7 +73,7 @@ const editorFiber = ctx.plugin(ConfigEditor)
 await editorFiber.await()
 const settingsFiber = ctx.plugin(Settings)
 await settingsFiber.await()
-const exec = { name: 'edit', callId: 'c1', arguments: { path: 'x' }, agent: { session }, schema: { description: 'edit' }, signal: new AbortController().signal }
+const exec = { name: 'edit', callId: 'c1', arguments: { path: 'x' }, agent: { session }, signal: new AbortController().signal }
 let downstream = 0
 const run = () => ctx.waterfall('tools/pre-execute', exec, async () => { downstream++; return { kind: 'allow' } })
 try {

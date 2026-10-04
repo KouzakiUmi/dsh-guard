@@ -292,7 +292,7 @@ function session(extra = {}) {
   return {
     header: { cwd: 'D:/review-cwd' },
     requestHeader() {
-      return { config: { provider: 'session-provider', model: 'session-model' } }
+      return { config: { provider: 'session-provider', model: 'session-model' }, tools: [{ name: 'edit', description: 'edit one file', parameters: { type: 'object' } }] }
     },
     snapshotEvents() {
       return extra.events ?? []
@@ -308,7 +308,6 @@ function execOf(overrides = {}) {
     callId: 'call-1',
     rootCallId: 'call-1',
     parent: undefined,
-    schema: { name: 'edit', description: 'edit one file', parameters: { type: 'object' } },
     signal: new AbortController().signal,
     agent: { session: session() },
     ...overrides,
@@ -461,7 +460,7 @@ await checkAsync('PTC 内层 run_code 会被审查', async () => {
     stream() {
       return decisionStream('{"risk":"high","decision":"deny","reason":"inner call"}')
     },
-  }, { name: 'run_code', parent: { callId: 'outer-run-code' } })
+  }, { name: 'run_code', parent: { callId: 'outer-run-code' }, schema: { name: 'run_code', description: 'bound inner call', parameters: { type: 'object' } } })
   assert(ctx.calls.stream === 1, '内层 run_code 必须发起审查')
   assert(result.kind === 'deny', `内层审查拒绝应为 deny，实际 ${result.kind}`)
   assert(nextCalls === 0, 'never 下内层拒绝不得直接 next()')

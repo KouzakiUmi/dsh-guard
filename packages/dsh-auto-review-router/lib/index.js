@@ -331,7 +331,9 @@ async function reviewGate(ctx, config, state, exec, next) {
 
 async function classify(ctx, config, state, exec, signal) {
   const session = exec.agent.session
-  const sessionRoute = readSessionRoute(session)
+  // One synchronous request-header snapshot pairs route and native tool schema.
+  const requestHeader = readRequestHeader(session)
+  const sessionRoute = readSessionRoute(requestHeader)
   const resolved = resolveReviewRoute(config, sessionRoute)
   if (!resolved.ok) throw new Error(resolved.reason)
   const cwd = readCwd(session, () => warnOnce(ctx, state, 'cwd', '会话没有 header.cwd，审查环境回退到进程工作目录'))
@@ -348,7 +350,7 @@ async function classify(ctx, config, state, exec, signal) {
     projectInstructions: extracted.projectInstructions,
     history: extracted.history,
     historyAvailable: extracted.historyAvailable,
-    pendingAction: pendingActionOf(exec),
+    pendingAction: pendingActionOf(exec, requestHeader),
     maxContextBytes: config.maxContextBytes,
     historyLimit: config.historyLimit,
     includeProjectInstructions: config.includeProjectInstructions,
@@ -464,17 +466,16 @@ function approvalPolicy(ctx, session) {
   }
 }
 
-function readSessionRoute(session) {
+function readRequestHeader(session) {
   if (typeof session?.requestHeader !== 'function') return undefined
-  try {
-    const header = session.requestHeader()
-    const provider = header?.config?.provider
-    const model = header?.config?.model
-    if (typeof provider === 'string' && provider.length > 0 && typeof model === 'string' && model.length > 0) {
-      return { provider, model }
-    }
-  } catch {
-    return undefined
+  try { return session.requestHeader() } catch { return undefined }
+}
+
+function readSessionRoute(header) {
+  const provider = header?.config?.provider
+  const model = header?.config?.model
+  if (typeof provider === 'string' && provider.length > 0 && typeof model === 'string' && model.length > 0) {
+    return { provider, model }
   }
   return undefined
 }

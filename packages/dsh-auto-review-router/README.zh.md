@@ -1,6 +1,12 @@
-# dsh-auto-review-router 0.2.2
+# dsh-auto-review-router 0.2.3
 
 可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。
+
+## 工具 schema 来源（0.2.3 修复）
+
+native 工具执行对象通常不携带 `exec.schema`；工具描述和参数 schema 从同一次 `session.requestHeader().tools` 中按精确工具名唯一匹配。PTC 内层则只读取其 `exec.schema` 绑定，且必须与执行名一致。缺失、重名、不完整或绑定不一致仍 fail-closed，不查询全局 registry 兜底，不用空参数 schema 掩盖缺失。该修复解决旧版 native 调用普遍报 `pending tool schema is incomplete` 的取值错误，不绕过模型审查或审批策略。
+
+`test/pending-schema.mjs` 使用当前官方 ToolRuntime 的实际 `createExecution` 生成无 schema 的 native 执行对象，再进入交付插件 gate；覆盖 write/read/pwsh/memory_status、请求头唯一性、PTC 绑定、缺失和真实 reviewer deny 的不执行边界。无需付费模型或真实工具执行。
 
 ## 可编辑设置
 
