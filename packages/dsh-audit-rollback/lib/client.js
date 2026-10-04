@@ -236,6 +236,7 @@ window.__ModuleLoader__.load({
     const name = 'dsh-audit-rollback'
     const inject = ['slots', 'locale', 'remote']
     function apply(ctx) {
+      console.info('[dsh-audit-rollback] client 已加载')
       try {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-audit-rollback: dictionaries')
       } catch (error) {
@@ -273,27 +274,44 @@ window.__ModuleLoader__.load({
           await new Promise((resolve) => setTimeout(resolve, 250))
         }
       }
+      // 注册字段对齐官方范本（dsh-client-ui-settings-plugins / plugin-inventory）：name/id/order/label/locale/inject。
+      // locale: NS 让槽渲染器把 label 绑定到本包字典命名空间并随语言切换刷新。
       const entry = {
         id: 'audit-rollback',
+        tabId: 'audit-rollback-tab',
         order: 40,
         label: () => t('nav'),
+        locale: NS,
         inject: () => ({ call, t }),
       }
-      const register = (slot) => ctx.slots.inject(slot, () => ctx.slots.register({
-        name: slot,
-        id: entry.id,
-        order: entry.order,
-        label: entry.label,
-        inject: entry.inject,
-      }, AuditPage))
-      try {
-        register('settings.plugins.tab')
-      } catch (error) {
-        console.error('[dsh-audit-rollback] settings.plugins.tab 不可用，退回 settings.section:', error)
-        try { register('settings.section') } catch (fallback) {
-          console.error('[dsh-audit-rollback] 设置页注册失败:', fallback)
-        }
+      // ctx.slots.inject 是等待语义：槽未声明时回调不执行、不抛错（renderer Slots.inject 用
+      // subscribeDeclaration 等待声明），因此 try/catch 回退永远不触发；诊断只能靠探针 + 日志。
+      const registerInto = (slot, id) => ctx.slots.inject(slot, () => {
+        const dispose = ctx.slots.register({
+          name: slot,
+          id,
+          order: entry.order,
+          label: entry.label,
+          locale: NS,
+          inject: entry.inject,
+        }, AuditPage)
+        console.info(`[dsh-audit-rollback] 已注册设置页: slot=${slot} id=${id} order=${entry.order}`)
+        return dispose
+      })
+      // 主入口：settings.section —— settings-shell 顶层声明的 list 槽，官方 general/models/plugins
+      // 与第三方 subusage 均注册于此，是设置侧栏导航的确定存在入口。
+      registerInto('settings.section', entry.id)
+      console.info('[dsh-audit-rollback] settings.section 主入口已挂 inject 等待')
+      // 可选附加：settings.plugins.tab 由 dsh-client-ui-settings-plugins 的 section children 声明，
+      // 存在性取决于该内置包是否启用。用 ctx.slots.spec()（Slots 服务公开方法，未声明返回 undefined）
+      // 打探针日志；注册本身仍走 inject 等待，以兼容该槽晚于本包声明的启动顺序。
+      const tabSpec = typeof ctx.slots.spec === 'function' ? ctx.slots.spec('settings.plugins.tab') : undefined
+      if (tabSpec !== undefined) {
+        console.info('[dsh-audit-rollback] 探针: settings.plugins.tab 已声明，附加注册插件页签')
+      } else {
+        console.warn('[dsh-audit-rollback] 探针: settings.plugins.tab 当前未声明，附加注册挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
       }
+      registerInto('settings.plugins.tab', entry.tabId)
     }
 
     exports.apply = apply
