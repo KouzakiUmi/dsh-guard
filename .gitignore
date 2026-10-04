@@ -1,0 +1,12 @@
+node_modules/
+*.log
+.tmp/
+tmp/
+.DS_Store
+Thumbs.db
+
+# 发布产物与 npm pack 中间文件（由 scripts/prepare-release.mjs 生成）
+dist/
+pack.json
+pack-*.json
+*.tgz

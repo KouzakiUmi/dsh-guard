@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# 顶层只读；只有 publish job 单独放开 contents: write。
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # monorepo 裁定：版本来源是两个包各自的 version，且必须相等（见 docs/release-plan.md §2）。
+      - name: Check package versions are equal and semver
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
+          const a = read('packages/dsh-audit-rollback/package.json');
+          const b = read('packages/dsh-auto-review-router/package.json');
+          const semver = /^\d+\.\d+\.\d+(-[\w.]+)?$/;
+          if (!semver.test(a.version) || !semver.test(b.version))
+            throw new Error(`version 不是 semver: ${a.name}@${a.version}, ${b.name}@${b.version}`);
+          if (a.version !== b.version)
+            throw new Error(`两包 version 不一致: ${a.name}@${a.version} vs ${b.name}@${b.version}`);
+          console.log(`版本一致: ${a.version}`);
+          NODE
+
+      # 遍历两个包下的全部 .js/.mjs（不硬编码文件名，排除 node_modules 与 test/.tmp*）。
+      - name: Syntax check all package sources
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { readdirSync } from 'node:fs';
+          import { join, relative } from 'node:path';
+          const files = [];
+          const walk = (dir) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === 'node_modules' || entry.name.startsWith('.tmp')) continue;
+              const full = join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (/\.(js|mjs|cjs)$/.test(entry.name)) files.push(full);
+            }
+          };
+          for (const pkg of readdirSync('packages', { withFileTypes: true }))
+            if (pkg.isDirectory()) walk(join('packages', pkg.name));
+          for (const file of files) {
+            execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+            console.log(`OK ${relative('.', file)}`);
+          }
+          console.log(`语法检查通过，共 ${files.length} 个文件`);
+          NODE
+
+      # 逐包跑 selftest 与 plugin-smoke；文件不存在即失败。
+      - name: Run package tests
+        run: |
+          set -e
+          for pkg in dsh-audit-rollback dsh-auto-review-router; do
+            for t in selftest plugin-smoke; do
+              test -f "packages/$pkg/test/$t.mjs"
+              node "packages/$pkg/test/$t.mjs"
+            done
+          done
+
+      - name: Check manifests
+        run: node scripts/check-manifest.mjs
+
+      # 中控验收脚本：必须退出码 0。
+      - name: Verify (acceptance harness)
+        run: node tools/verify.mjs
+
+      # 打包与校验：--ignore-scripts 防止生命周期脚本执行；prepare-release 断言包内文件集合。
+      - name: Pack and validate release assets
+        run: |
+          set -e
+          for pkg in dsh-audit-rollback dsh-auto-review-router; do
+            ( cd "packages/$pkg" && npm pack --ignore-scripts --json > ../../pack-$pkg.json )
+          done
+          node scripts/prepare-release.mjs
+
+      # 只有 main 的 push 才上传发布产物（PR 与其它分支不进入发布链路）。
+      - name: Upload verified release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # 合并 PR 会触发 main 的 push；PR 与其它分支绝不进入有写权限的发布 job。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: automatic-release-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: dist
+
+      - name: Prepare commit-specific release
+        id: metadata
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 使用有认证的 API，也适用于私有仓库；查询失败直接让 job 失败。
+          # 旧的慢构建不能在新提交到达后覆盖 latest（防旧构建覆盖保护）。
+          head=$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [ "$head" != "$COMMIT_SHA" ]; then
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'main 已有更新的提交，跳过本次过期发布。'
+            exit 0
+          fi
+          echo 'current=true' >> "$GITHUB_OUTPUT"
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          // version 取自两个包；相等已由 test job 保证。
+          const { version } = JSON.parse(readFileSync('packages/dsh-audit-rollback/package.json', 'utf8'));
+          const sha = process.env.COMMIT_SHA.slice(0, 12);
+          appendFileSync(process.env.GITHUB_OUTPUT, `tag=build-${sha}\nname=v${version} · ${sha}\n`);
+          NODE
+
+      # latest 只由 main 的自动发布维护（用户硬要求），且仅当本次构建仍是 main 最新提交。
+      - name: Publish GitHub Release
+        if: steps.metadata.outputs.current == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          name: ${{ steps.metadata.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*.tgz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          make_latest: true
+          prerelease: false

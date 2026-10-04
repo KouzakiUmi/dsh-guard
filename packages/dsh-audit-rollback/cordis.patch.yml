@@ -1,0 +1,28 @@
+# dsh-audit-rollback —— 自我挂载（只 insert 本插件一行）
+#
+# 这里给的是**保守默认**：捕获文件工具（write/edit/str_replace_editor）的编辑前
+# 内容进 CAS、记 JSONL 审计账本；stateDir 不显式指定（回落到
+# $DSH_HOME/audit-rollback → ~/.dsh/audit-rollback）；gitSnapshot 关闭。
+#
+# 注意 Loader 对同一个 id 的 config 是**整体替换**：profile 里写 config 时必须把
+# 下面这些字段全部写全，否则未写的字段会回落到插件默认值。
+#
+# 字段：
+#   stateDir        字符串     状态目录（展开 ~；缺省见上）
+#   captureTools    [工具名…]  要捕获编辑前内容的工具（默认 write/edit/str_replace_editor）
+#   captureMaxBytes 整数       单文件捕获上限（默认 2097152 = 2 MiB；超限记 hash:null + note）
+#   argsMaxBytes    整数       call 条目 argsPreview 截断上限（默认 4096 UTF-8 字节）
+#   logCalls        true       是否记录每次工具调用的 call 条目
+#   excludeGlobs    [glob…]    命中即不捕获：含通配符按 glob（* / ** / ?）匹配，
+#                              不含通配符按路径片段匹配（如 /node_modules/ 命中其下任意文件）
+#   gitSnapshot     false      影子 git 快照开关（本阶段未实现，打开只记 note + warn）
+- insert:
+    - id: audit-rollback
+      name: dsh-audit-rollback
+      config:
+        captureTools: ['write', 'edit', 'str_replace_editor']
+        captureMaxBytes: 2097152
+        argsMaxBytes: 4096
+        logCalls: true
+        excludeGlobs: ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/']
+        gitSnapshot: false

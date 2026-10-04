@@ -1,0 +1,16 @@
+# 统一换行：仓库内一律 LF。
+# 理由：CI 跑在 Linux，本地是 Windows；若入库用 CRLF，会与 CI 产生无意义的行尾差异。
+# 尤其 scripts/audit-rollback.mjs 带 shebang，CRLF 会让 Unix 上的 shebang 失效
+# （/usr/bin/env: 'node\r': No such file or directory）。
+* text=auto eol=lf
+
+# 二进制：不参与换行转换
+*.tgz binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary

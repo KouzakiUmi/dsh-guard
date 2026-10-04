@@ -1,0 +1,21 @@
+{
+  "name": "dsh-guard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 的沙箱侧加固工具集：持久审计与文件回滚、可指定模型的自动审批。",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "selftest": "node packages/dsh-audit-rollback/test/selftest.mjs",
+    "verify": "node tools/verify.mjs",
+    "check-manifest": "node scripts/check-manifest.mjs",
+    "pack:all": "node scripts/pack-all.mjs",
+    "release:local": "npm run verify && npm run check-manifest && npm run pack:all"
+  },
+  "license": "MIT"
+}

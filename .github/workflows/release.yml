@@ -1,0 +1,103 @@
+# 版本化发布（v* tag）；main 的自动构建发布在 ci.yml 中执行。
+# 本 workflow 的 make_latest: false —— latest 只由 main 的自动发布维护，旧 tag 不得使它回退。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: versioned-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # tag 必须等于 v<version>，且两包 version 相同（monorepo 裁定，见 docs/release-plan.md §4）。
+      - name: Check tag matches package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
+          const a = read('packages/dsh-audit-rollback/package.json');
+          const b = read('packages/dsh-auto-review-router/package.json');
+          if (a.version !== b.version)
+            throw new Error(`两包 version 不一致: ${a.name}@${a.version} vs ${b.name}@${b.version}`);
+          if (process.env.RELEASE_TAG !== `v${a.version}`)
+            throw new Error(`Tag 必须等于 v${a.version}，实际 ${process.env.RELEASE_TAG}`);
+          console.log(`tag ${process.env.RELEASE_TAG} 与版本 ${a.version} 一致`);
+          NODE
+
+      # 与 ci.yml test job 第 4–7 步一致：语法遍历、逐包测试、verify、打包校验。
+      - name: Syntax check all package sources
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { readdirSync } from 'node:fs';
+          import { join, relative } from 'node:path';
+          const files = [];
+          const walk = (dir) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === 'node_modules' || entry.name.startsWith('.tmp')) continue;
+              const full = join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (/\.(js|mjs|cjs)$/.test(entry.name)) files.push(full);
+            }
+          };
+          for (const pkg of readdirSync('packages', { withFileTypes: true }))
+            if (pkg.isDirectory()) walk(join('packages', pkg.name));
+          for (const file of files) {
+            execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+            console.log(`OK ${relative('.', file)}`);
+          }
+          console.log(`语法检查通过，共 ${files.length} 个文件`);
+          NODE
+
+      - name: Run package tests
+        run: |
+          set -e
+          for pkg in dsh-audit-rollback dsh-auto-review-router; do
+            for t in selftest plugin-smoke; do
+              test -f "packages/$pkg/test/$t.mjs"
+              node "packages/$pkg/test/$t.mjs"
+            done
+          done
+
+      - name: Check manifests
+        run: node scripts/check-manifest.mjs
+
+      - name: Verify (acceptance harness)
+        run: node tools/verify.mjs
+
+      - name: Pack and validate release assets
+        run: |
+          set -e
+          for pkg in dsh-audit-rollback dsh-auto-review-router; do
+            ( cd "packages/$pkg" && npm pack --ignore-scripts --json > ../../pack-$pkg.json )
+          done
+          node scripts/prepare-release.mjs
+
+      - name: Create versioned GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          # latest 由 main 的自动发布维护，旧 tag 不得使它回退。
+          make_latest: false

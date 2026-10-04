@@ -1,0 +1,15 @@
+- insert:
+    - id: auto-review-router
+      name: dsh-auto-review-router
+      config:
+        enabled: false
+        reviewerProvider: ''
+        reviewerModel: ''
+        reviewerEffort: ''
+        fallbackToSessionRoute: true
+        maxContextBytes: 32768
+        historyLimit: 20
+        includeProjectInstructions: true
+        temperature: 0
+        timeoutMs: 20000
+        logDecisions: true
