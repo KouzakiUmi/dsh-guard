@@ -124,6 +124,16 @@ for (const name of names) {
 	}
 	ok(name, "exports 目标均存在");
 
+	// 6b. exports 必须显式声明 "./client" 子路径指向 ./lib/client.js。
+	//     GUI 客户端加载器按 <pkg>/client 解析入口；此前只校验「已声明的目标存在」，
+	//     删掉该条目会静默漏检、设置页不加载（设计契约 §3 的加载前提）。
+	const clientTarget = pkg.exports?.["./client"];
+	if (clientTarget !== "./lib/client.js") {
+		fail(name, `exports["./client"] 应为 "./lib/client.js"，实际 ${JSON.stringify(clientTarget)}`);
+	} else {
+		ok(name, `exports["./client"] -> ${clientTarget}`);
+	}
+
 	// 7. cordis.patch.yml 含 - insert:，且其中 name: 等于本包名
 	const patchFile = join(dir, "cordis.patch.yml");
 	if (existsSync(patchFile)) {

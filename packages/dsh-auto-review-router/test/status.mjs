@@ -120,11 +120,37 @@ ok('缺少 registerAuto 仍然抛错，不改既有失败语义', () => {
   )
 })
 
-ok('client 描述符与 host 对齐，且两端都没有核心包 import', () => {
+ok('client 描述符与 host 逐字段全等，且两端都没有核心包 import', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const host = readFileSync(join(testDir, '..', 'lib', 'index.js'), 'utf8')
-  assert.equal(routerStatusRemote.descriptors[0].id, 'dsh-auto-review-router#autoReviewRouter/read')
-  assert.ok(client.includes(routerStatusRemote.descriptors[0].id))
+  const descriptor = routerStatusRemote.descriptors[0]
+  assert.equal(descriptor.id, 'dsh-auto-review-router#autoReviewRouter/read')
+  // 客户端是 ModuleLoader factory 无法 import，从源码文本提取描述符字段与 host 逐字段严格相等。
+  // （此前用 includes 子串断言，read→readX 这类变异会幸存。）
+  const grab = (pattern, field) => {
+    const match = client.match(pattern)
+    assert.ok(match, `client.js 未找到描述符字段 ${field}`)
+    return match[1]
+  }
+  const extracted = {
+    id: grab(/\bid:\s*'([^']*#[^']*)'/, 'id'),
+    service: grab(/\bservice:\s*'([^']+)'/, 'service'),
+    namespace: grab(/\bnamespace:\s*'([^']+)'/, 'namespace'),
+    method: grab(/\bmethod:\s*'([^']+)'/, 'method'),
+    typeSymbol: grab(/\btypeSymbol:\s*'([^']+)'/, 'typeSymbol'),
+  }
+  assert.equal(extracted.id, descriptor.id)
+  assert.equal(extracted.service, descriptor.service)
+  assert.equal(extracted.namespace, descriptor.namespace)
+  assert.equal(extracted.method, descriptor.method)
+  assert.equal(extracted.typeSymbol, descriptor.result.typeSymbol)
+  // 客户端实际调用点 call('<method>') 必须与描述符 method 一致，否则运行时 Host 缺方法。
+  const invokedMethods = [...client.matchAll(/\bcall\(\s*'([^']+)'\s*\)/g)].map((match) => match[1])
+  assert.ok(invokedMethods.length > 0, 'client.js 未找到 call(...) 调用点')
+  for (const invoked of invokedMethods) {
+    assert.equal(invoked, descriptor.method)
+  }
+  assert.ok(client.includes("require('react')"))
   const forbidden = /(?:from\s*['"]@deepseek-ai\/|require\(\s*['"]@deepseek-ai\/|import\(\s*['"]@deepseek-ai\/)/
   assert.equal(forbidden.test(client), false)
   assert.equal(forbidden.test(host), false)

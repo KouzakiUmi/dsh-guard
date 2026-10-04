@@ -2,22 +2,22 @@
 /**
  * 假 ctx 调用 Host 只读状态查询。
  * 覆盖账本统计、objects 统计、capture 明细、配置回显。
- * 数据只写 test/.tmp-status，不写 ~/.dsh。
+ * 数据只写系统临时目录（mkdtemp，finally 清理），不落仓库、不写 ~/.dsh。
  */
 import assert from 'node:assert/strict'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, queryAuditStatus, auditStatusRemote } from '../lib/index.js'
 import { appendEntry, capturePath, initState, putObject, sha1Hex } from '../lib/ledger.js'
 
 const testDir = dirname(fileURLToPath(import.meta.url))
-const tmpRoot = join(testDir, '.tmp-status')
+const tmpRoot = mkdtempSync(join(tmpdir(), 'dsh-audit-status-'))
 const stateDir = join(tmpRoot, 'state')
 const sample = join(tmpRoot, 'sample.txt')
 const sampleText = 'hello-audit'
 
-rmSync(tmpRoot, { recursive: true, force: true })
 initState(stateDir)
 writeFileSync(sample, sampleText)
 appendEntry(stateDir, { kind: 'turn/start', session: 's', turn: 1 })
@@ -59,6 +59,7 @@ function ok(label, fn) {
   }
 }
 
+try {
 ok('假 ctx 回显账本、objects、capture 与配置', () => {
   const status = queryAuditStatus(fakeCtx)
   assert.equal(status.plugin, 'dsh-audit-rollback')
@@ -118,18 +119,45 @@ ok('apply 后的假 ctx 读到本次生效配置，且不要求 reflect/inject',
   assert.equal(status.ledger.entryCount, 6)
 })
 
-ok('client 描述符与 host 对齐，且两端都没有核心包 import', () => {
+ok('client 描述符与 host 逐字段全等，且两端都没有核心包 import', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const host = readFileSync(join(testDir, '..', 'lib', 'index.js'), 'utf8')
-  assert.equal(auditStatusRemote.descriptors[0].id, 'dsh-audit-rollback#auditRollback/read')
-  assert.ok(client.includes(auditStatusRemote.descriptors[0].id))
+  const descriptor = auditStatusRemote.descriptors[0]
+  assert.equal(descriptor.id, 'dsh-audit-rollback#auditRollback/read')
+  // 客户端是 ModuleLoader factory 无法 import，从源码文本提取描述符字段与 host 逐字段严格相等。
+  // （此前用 includes 子串断言，read→readX 这类变异会幸存。）
+  const grab = (pattern, field) => {
+    const match = client.match(pattern)
+    assert.ok(match, `client.js 未找到描述符字段 ${field}`)
+    return match[1]
+  }
+  const extracted = {
+    id: grab(/\bid:\s*'([^']*#[^']*)'/, 'id'),
+    service: grab(/\bservice:\s*'([^']+)'/, 'service'),
+    namespace: grab(/\bnamespace:\s*'([^']+)'/, 'namespace'),
+    method: grab(/\bmethod:\s*'([^']+)'/, 'method'),
+    typeSymbol: grab(/\btypeSymbol:\s*'([^']+)'/, 'typeSymbol'),
+  }
+  assert.equal(extracted.id, descriptor.id)
+  assert.equal(extracted.service, descriptor.service)
+  assert.equal(extracted.namespace, descriptor.namespace)
+  assert.equal(extracted.method, descriptor.method)
+  assert.equal(extracted.typeSymbol, descriptor.result.typeSymbol)
+  // 客户端实际调用点 call('<method>') 必须与描述符 method 一致，否则运行时 Host 缺方法。
+  const invokedMethods = [...client.matchAll(/\bcall\(\s*'([^']+)'\s*\)/g)].map((match) => match[1])
+  assert.ok(invokedMethods.length > 0, 'client.js 未找到 call(...) 调用点')
+  for (const invoked of invokedMethods) {
+    assert.equal(invoked, descriptor.method)
+  }
   assert.ok(client.includes("require('react')"))
   const forbidden = /(?:from\s*['"]@deepseek-ai\/|require\(\s*['"]@deepseek-ai\/|import\(\s*['"]@deepseek-ai\/)/
   assert.equal(forbidden.test(client), false)
   assert.equal(forbidden.test(host), false)
 })
 
-rmSync(tmpRoot, { recursive: true, force: true })
+} finally {
+  rmSync(tmpRoot, { recursive: true, force: true })
+}
 if (failed > 0) {
   console.error(`status: ${failed} 项失败`)
   process.exit(1)
