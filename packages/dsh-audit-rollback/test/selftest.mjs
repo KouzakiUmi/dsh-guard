@@ -227,11 +227,21 @@ ok('账本 append-only：回滚前后已有行字节不变（只追加）', () =
 
 // ---------- 7. trash 卷标识保留盘符 + 禁止覆盖（契约第 3 节修正 F1） ----------
 ok('trash 卷标识：Windows 保留盘符字母目录，目标已存在时追加序号绝不覆盖', () => {
+  // 合成输入，不经过 path.resolve。盘符串在识别前就被解析，Windows 与 Linux 结果相同。
   const relC = trashRelativePath('C:\\proj\\same\\file.txt')
   const relD = trashRelativePath('D:\\proj\\same\\file.txt')
-  assert.equal(relC.split(sep)[0], 'C', 'C 盘路径的第一段必须是盘符字母 C')
-  assert.equal(relD.split(sep)[0], 'D', 'D 盘路径的第一段必须是盘符字母 D')
+  assert.equal(relC.split(sep)[0], 'C', 'Windows 盘符路径的第一段必须是盘符字母，且不得被 cwd 吞掉')
+  assert.equal(relD.split(sep)[0], 'D', '另一盘符必须保留为不同的第一段')
   assert.notEqual(relC, relD, '跨盘同后缀路径在 trash 内必须映射到不同位置')
+  assert.equal(relC, ['C', 'proj', 'same', 'file.txt'].join(sep))
+
+  // POSIX 绝对路径：卷根 `/` 的转写是去掉根斜杠，不依赖 cwd，同后缀不同根不碰撞。
+  const posixA = trashRelativePath('/vol-a/proj/same/file.txt')
+  const posixB = trashRelativePath('/vol-b/proj/same/file.txt')
+  assert.equal(posixA, ['vol-a', 'proj', 'same', 'file.txt'].join(sep), 'POSIX 卷根转写必须稳定')
+  assert.equal(posixB, ['vol-b', 'proj', 'same', 'file.txt'].join(sep))
+  assert.notEqual(posixA, posixB, 'POSIX 不同根、相同后缀不得碰撞')
+  assert.equal(posixA.split(sep)[0], 'vol-a', 'POSIX 结果不得带入 cwd 的第一段')
 
   // 同一路径两次进 trash：第二次必须拿 -1 序号，第一次的备份不得被覆盖
   const victim = join(workDir, 'collision.txt')

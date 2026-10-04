@@ -249,3 +249,4 @@ audit-rollback last     [--state <dir>] [--apply] [--force] [--json]
 - 不 `git commit`、不 `git push`（由中控决定提交）。
 - 代码注释用中文，风格对照 `dsh-preset-tool-guard`。
 - 任何"猜"出来的 API 用法，必须在 README 的"未核实项"一节列出。
+- **测试必须跨平台**（2026-10-04 补，来源：首次 CI 在 `ubuntu-latest` 上 9 秒失败）：CI 跑 Linux、本地是 Windows，测试与实现都**不得依赖 Windows 专有语义** —— 盘符、`\` 分隔符、`path.resolve` 的平台行为、盘符大小写敏感度。平台相关行为必须**按平台分支断言**（`process.platform === 'win32'`），或改用与平台无关的合成输入（例如显式传入已构造好的绝对路径，而不是让测试去 `resolve` 一个 `C:/...` 字符串）。任何新增测试在提交前必须能**同时在 Windows 与 Linux 上通过**；只在一端跑过的测试不得声称通过。

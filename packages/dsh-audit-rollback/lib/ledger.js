@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, join, posix, resolve, sep, win32 } from 'node:path'
 
 /** 账本条目版本号（契约第 4 节：所有条目恒为 1）。 */
 export const LEDGER_VERSION = 1
@@ -418,25 +418,38 @@ export function newTrashDir(stateDir) {
   return dir
 }
 
+/** 按 `/` 或 `\` 切开，丢掉空段。不使用平台 `path.resolve`。 */
+function splitPathSegments(value) {
+  return String(value).split(/[/\\]+/).filter(Boolean)
+}
+
 /**
- * 绝对路径 → 回收站内相对路径（契约第 3 节，2026-10-04 修正 F1）：
- * 卷标识必须保留——Windows 用盘符字母作第一段目录（D:\a\b.txt → D/a/b.txt），
- * UNC 归到 UNC/<主机>/<共享>/…，POSIX 去掉根斜杠。
- * 一律不得去盘符：去掉后跨盘同后缀路径会碰撞，后一次备份覆盖前一次，
- * 先备份的字节不可恢复（核验者已实证丢字节）。
+ * 绝对路径 → 回收站内相对路径（契约第 3 节）。
+ *
+ * 在调用平台 `path.resolve` 之前识别路径形态。POSIX 的 `resolve('C:\\proj\\...')`
+ * 会把盘符字符串当成相对路径拼进 cwd，第一段变成 `home` 之类的偶然结果；
+ * Windows 的 `resolve('/proj/...')` 又会补上当前盘符。两种都不是稳定的卷标识。
+ *
+ * - Windows 盘符：`C:\a\b.txt` / `C:/a/b.txt` → 第一段为盘符字母，其余为路径段。
+ * - UNC：`\\server\share\...` 或 `//server/share/...` → `UNC/server/share/...`。
+ * - POSIX 绝对路径：去掉根斜杠，`/home/runner/proj/same/file.txt` → `home/runner/proj/same/file.txt`。
+ *   这是卷根 `/` 的可读转写，不依赖 cwd，同后缀不同根不会碰撞。
+ * 相对路径才交给当前平台 `resolve`，得到绝对路径后再走上面的分支。
  */
 export function trashRelativePath(absPath) {
-  const resolved = resolve(absPath)
-  const drive = /^([A-Za-z]):/.exec(resolved)
-  let segments
-  if (drive !== null) {
-    segments = [drive[1], ...resolved.slice(2).split(/[/\\]+/).filter(Boolean)]
-  } else if (resolved.startsWith('\\\\')) {
-    segments = ['UNC', ...resolved.replace(/^[/\\]+/, '').split(/[/\\]+/).filter(Boolean)]
-  } else {
-    segments = resolved.split(/[/\\]+/).filter(Boolean)
+  const raw = String(absPath)
+  const drive = /^([A-Za-z]):(?:[\\/]|$)/.exec(raw)
+  if (drive) {
+    const rest = win32.normalize(raw).slice(2)
+    return [drive[1], ...splitPathSegments(rest)].join(sep)
   }
-  return segments.join(sep)
+  if (raw.startsWith('\\\\') || raw.startsWith('//')) {
+    return ['UNC', ...splitPathSegments(raw.replace(/^[/\\]+/, ''))].join(sep)
+  }
+  if (raw.startsWith('/')) {
+    return splitPathSegments(posix.normalize(raw)).join(sep)
+  }
+  return trashRelativePath(resolve(raw))
 }
 
 /** trash 目标已存在时禁止覆盖（契约第 3 节）：追加 -1/-2 … 直到取到未占用名。 */
