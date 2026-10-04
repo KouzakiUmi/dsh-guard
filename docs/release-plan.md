@@ -108,7 +108,7 @@ D:\dsh-guard\
 
 1. `name` 为目录名；`version` 符合 semver。
 2. `dsh.bundle.patch` 存在且指向的文件真实存在（awesome 收录硬性要求）。
-3. **`@deepseek-ai/*` 不得出现在 `dependencies`**；必须出现在 `peerDependencies`（本仓库口径：`"@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.3.0-0"`）。
+3. **`@deepseek-ai/*` 不得出现在 `dependencies`**；必须出现在 `peerDependencies`（本仓库口径：`"@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0"`，后半段才能匹配 `0.2.1-alpha.1`）。
 4. `repository.url` 指向 `KouzakiUmi/dsh-guard`，且 `repository.directory` 等于 `packages/<包名>`。
 5. `files` 白名单**恰好**覆盖运行必需文件（见 §6），且**不得**包含 `test`、`tools`、`node_modules`。
 6. `exports` 里每个字符串目标在磁盘上存在（`*` 通配只校验其目录）。
@@ -129,8 +129,8 @@ D:\dsh-guard\
 
 | 包 | 必需文件 |
 |---|---|
-| `dsh-audit-rollback` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/ledger.js`、`scripts/audit-rollback.mjs` |
-| `dsh-auto-review-router` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/policy.js`、`lib/context.js` |
+| `dsh-audit-rollback` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/client.js`、`lib/ledger.js`、`scripts/audit-rollback.mjs` |
+| `dsh-auto-review-router` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/client.js`、`lib/policy.js`、`lib/context.js` |
 
 - 复制为 `dist/<name>.tgz`（固定资产名，不带版本号，与参考实现一致）。
 - 打印每个产物的 `name@version`、字节数与文件数。
@@ -150,7 +150,7 @@ D:\dsh-guard\
     "directory": "packages/<包名>"        // monorepo 必需
   },
   "keywords": ["dsh", "dsh-plugin", "dsh-bundle", "deepseek-harness", "cordis", "...特性词"],
-  "peerDependencies": { "@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.3.0-0" },
+  "peerDependencies": { "@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0" },
   "dsh": {
     "manifestVersion": 1,                // 补
     "bundle": { "patch": "./cordis.patch.yml" }
@@ -160,8 +160,8 @@ D:\dsh-guard\
 
 `files` 收紧为运行必需（去掉 `test/`）：
 
-- `dsh-audit-rollback`：`["lib/index.js","lib/ledger.js","scripts/audit-rollback.mjs","cordis.patch.yml","README.zh.md"]`
-- `dsh-auto-review-router`：`["lib/index.js","lib/policy.js","lib/context.js","cordis.patch.yml","README.zh.md"]`
+- `dsh-audit-rollback`：`["lib/index.js","lib/client.js","lib/ledger.js","scripts/audit-rollback.mjs","cordis.patch.yml","README.zh.md"]`
+- `dsh-auto-review-router`：`["lib/index.js","lib/client.js","lib/policy.js","lib/context.js","cordis.patch.yml","README.zh.md"]`
 
 ---
 

@@ -52,7 +52,11 @@ patch 默认值见 `cordis.patch.yml`。本包不导出 Cordis `Config` schema�
 
 路由规则：`reviewerProvider` 与 `reviewerModel` **都非空**时用配置路由；否则在 `fallbackToSessionRoute: true` 时用 `session.requestHeader().config` 的 provider/model；再否则拒绝，理由说明配置不完整。只配了一半、或配了 effort 但没配模型，都算配置不全，不会把残缺配置和会话路由拼在一起。会话回退不附带 `reviewerEffort`。
 
-示例（把审查固定到另一条路由）。provider 与 model 必须来自本机已配置的路由，留空则回退会话路由。下面的 `xai-oauth` / `grok-4.7` 是本机已存在的组合；写成未配置的名字会在审查时 `NO_ADAPTER` 失败。
+兼容范围：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0`。前半覆盖 `0.2.0` 的 rc 预发布；后半用带预发布标签的 `0.2.1-0` 放行 `0.2.1` 起、`0.3.0` 前的预发布（含本机 `0.2.1-alpha.1`）。只写前半段时，node-semver 匹配不到 `0.2.1-alpha.1`。
+
+设置页（「插件」分区，只读）显示 `enabled`、Auto 是否注册成功、路由来源、预算和冲突警告。第一版不写配置。改配置写在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `- id: auto-review-router` 下；同 id 的 config 是整体替换，字段要写全。
+
+示例（把审查固定到另一条路由）。provider 与 model 必须来自本机已配置的路由，留空则回退会话路由。下面的 `xai-oauth` / `grok-4.7` 是本机已存在的组合；写成未配置的名字会在审查时 `NO_ADAPTER` 失败。上面的片段只演示路由字段，落盘时仍须写全其余字段，否则未写字段回落默认值。
 
 ```yaml
 - id: auto-review-router
@@ -88,7 +92,7 @@ patch 默认值见 `cordis.patch.yml`。本包不导出 Cordis `Config` schema�
 ## 限制
 
 - 不实现「记住授权 / allow-always」。官方审批 seam 没有这个能力。
-- 不做 GUI。
+- 设置页只读，不在 GUI 里改配置。配置仍是 cordis Config，要改就写 profile 的 `cordis.patch.yml`。
 - 不修改安装树，不写 `~/.dsh`。
 - 模型可能误放行或误拒绝。本包没有重试、没有工具名白名单。
 - 外层 `run_code` 程序内部不经工具调用的 Node 副作用不会被这条门看到。

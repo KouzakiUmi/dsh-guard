@@ -14,7 +14,8 @@
  * 不遍历目录；同一路径同一轮只读一次（beforeSeen 去重）。
  */
 
-import { isAbsolute, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import {
   appendEntry,
   capturePath,
@@ -22,6 +23,7 @@ import {
   initState,
   matchesAnyGlob,
   previewArgs,
+  readAllEntries,
   resolveStateDir,
   sha1Hex,
 } from './ledger.js'
@@ -86,19 +88,294 @@ export function identifyTarget(argsValue, cwd) {
   return undefined
 }
 
+/** 设置页「最近捕获」条数。只读查询固定取这个窗口，避免无参 remote 再传 limit。 */
+export const RECENT_CAPTURE_LIMIT = 8
+
+const LEDGER_KINDS = ['turn/start', 'call', 'capture', 'turn/end', 'rollback', 'note']
+
+/** 每个 apply 实例的生效配置与初始化结果。假 ctx 测试与设置页读的是同一份。 */
+const runtimeByCtx = new WeakMap()
+
+/**
+ * 只读状态。可对假 ctx 直接调用：优先用该 ctx 上一次 apply 记下的配置，
+ * 否则规范化 `rawConfig ?? ctx.config`。不注册监听、不写账本。
+ * @param {object} ctx
+ * @param {object} [rawConfig]
+ */
+export function queryAuditStatus(ctx, rawConfig) {
+  const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
+  const config = live?.config ?? normalizeConfig(rawConfig ?? ctx?.config)
+  return collectAuditStatus(config, live)
+}
+
+function collectAuditStatus(config, live) {
+  const stateDir = config.stateDir
+  const stateFile = readStateMeta(stateDir)
+  const entries = safeEntries(stateDir)
+  const byKind = emptyKinds()
+  for (const entry of entries) {
+    const kind = entry && typeof entry.kind === 'string' ? entry.kind : 'other'
+    if (LEDGER_KINDS.includes(kind)) byKind[kind] += 1
+    else byKind.other += 1
+  }
+  const captures = summarizeCaptures(entries)
+  const objects = readObjectStats(stateDir)
+  return {
+    plugin: 'dsh-audit-rollback',
+    state: {
+      stateDir,
+      stateReady: live ? live.stateReady === true : stateFile.readable,
+      version: stateFile.version,
+      createdAt: stateFile.createdAt,
+      stateError: stateFile.error,
+      initError: live?.initError ?? null,
+    },
+    ledger: {
+      fileCount: countLedgerFiles(stateDir),
+      entryCount: entries.length,
+      byKind,
+    },
+    objects,
+    captures,
+    config: {
+      captureTools: config.captureTools.slice(),
+      captureMaxBytes: config.captureMaxBytes,
+      argsMaxBytes: config.argsMaxBytes,
+      logCalls: config.logCalls,
+      excludeGlobs: config.excludeGlobs.slice(),
+      gitSnapshot: config.gitSnapshot,
+    },
+  }
+}
+
+function emptyKinds() {
+  const byKind = { other: 0 }
+  for (const kind of LEDGER_KINDS) byKind[kind] = 0
+  return byKind
+}
+
+function safeEntries(stateDir) {
+  try {
+    return readAllEntries(stateDir)
+  } catch {
+    return []
+  }
+}
+
+function countLedgerFiles(stateDir) {
+  const dir = join(stateDir, 'ledger')
+  if (!existsSync(dir)) return 0
+  try {
+    return readdirSync(dir).filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).length
+  } catch {
+    return 0
+  }
+}
+
+function readStateMeta(stateDir) {
+  const file = join(stateDir, 'state.json')
+  if (!existsSync(file)) return { readable: false, version: null, createdAt: null, error: null }
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    return {
+      readable: true,
+      version: parsed && typeof parsed.version === 'number' ? parsed.version : null,
+      createdAt: parsed && typeof parsed.createdAt === 'string' ? parsed.createdAt : null,
+      error: null,
+    }
+  } catch (error) {
+    return {
+      readable: false,
+      version: null,
+      createdAt: null,
+      error: error && error.message ? error.message : String(error),
+    }
+  }
+}
+
+function readObjectStats(stateDir) {
+  const root = join(stateDir, 'objects')
+  if (!existsSync(root)) return { count: 0, totalBytes: 0, error: null }
+  let count = 0
+  let totalBytes = 0
+  const stack = [root]
+  try {
+    while (stack.length > 0) {
+      const dir = stack.pop()
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name)
+        const info = statSync(full)
+        if (info.isDirectory()) stack.push(full)
+        else if (info.isFile()) {
+          count += 1
+          totalBytes += info.size
+        }
+      }
+    }
+    return { count, totalBytes, error: null }
+  } catch (error) {
+    return {
+      count,
+      totalBytes,
+      error: error && error.message ? error.message : String(error),
+    }
+  }
+}
+
+function summarizeCaptures(entries) {
+  const paths = new Set()
+  const rows = []
+  for (const entry of entries) {
+    if (!entry || entry.kind !== 'capture') continue
+    const path = typeof entry.path === 'string' ? entry.path : ''
+    if (path.length > 0) paths.add(path)
+    rows.push({
+      ts: typeof entry.ts === 'string' ? entry.ts : '',
+      phase: typeof entry.phase === 'string' ? entry.phase : '',
+      fileName: path.length > 0 ? basename(path) : '',
+      hashPrefix: typeof entry.hash === 'string' && entry.hash.length > 0 ? entry.hash.slice(0, 8) : null,
+      bytes: typeof entry.bytes === 'number' ? entry.bytes : null,
+    })
+  }
+  return {
+    uniquePaths: paths.size,
+    recentLimit: RECENT_CAPTURE_LIMIT,
+    recent: rows.slice(-RECENT_CAPTURE_LIMIT).reverse(),
+  }
+}
+
+function parseAuditStatus(value) {
+  if (!value || typeof value !== 'object' || value.plugin !== 'dsh-audit-rollback') {
+    throw new Error('Invalid audit-rollback status')
+  }
+  if (!value.state || typeof value.state.stateDir !== 'string') throw new Error('Invalid audit-rollback status.state')
+  if (!value.ledger || typeof value.ledger.fileCount !== 'number' || typeof value.ledger.entryCount !== 'number' || !value.ledger.byKind) {
+    throw new Error('Invalid audit-rollback status.ledger')
+  }
+  if (!value.objects || typeof value.objects.count !== 'number' || typeof value.objects.totalBytes !== 'number') {
+    throw new Error('Invalid audit-rollback status.objects')
+  }
+  if (!value.captures || typeof value.captures.uniquePaths !== 'number' || !Array.isArray(value.captures.recent)) {
+    throw new Error('Invalid audit-rollback status.captures')
+  }
+  if (!value.config || !Array.isArray(value.config.captureTools)) throw new Error('Invalid audit-rollback status.config')
+  return value
+}
+
+function statusCodec(typeSymbol, parse) {
+  return {
+    mode: 'strict',
+    typeSymbol,
+    schema: { parse },
+    create: () => ({ parse }),
+  }
+}
+
+/** 与 lib/client.js 的 remote 描述符对齐。Client 不能 import 本文件，改动时两边一起改。 */
+export const auditStatusRemote = {
+  package: 'dsh-audit-rollback',
+  descriptors: [
+    {
+      id: 'dsh-audit-rollback#auditRollback/read',
+      service: 'auditRollback',
+      namespace: 'auditRollback',
+      method: 'read',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: statusCodec('dsh-audit-rollback#AuditStatus', parseAuditStatus),
+    },
+  ],
+}
+
+// Gateway 用这个属性名读 SRC 方法标记。这是字符串键，不是对核心包的 import。
+const REMOTE_METHOD_KEY = '@deepseek-ai/dsh-typert-protocol/remote-methods'
+
+function markDirectRemote(prototype, method) {
+  const current = Object.getOwnPropertyDescriptor(prototype, REMOTE_METHOD_KEY)?.value
+  const methods = Array.isArray(current?.methods) ? current.methods : []
+  if (methods.some((item) => item.method === method)) return
+  Object.defineProperty(prototype, REMOTE_METHOD_KEY, {
+    configurable: true,
+    enumerable: false,
+    value: Object.freeze({
+      version: 1,
+      methods: Object.freeze([
+        ...methods,
+        Object.freeze({ method, invocation: Object.freeze({ kind: 'direct' }) }),
+      ]),
+    }),
+  })
+}
+
+class AuditStatusRemote {
+  read() {
+    throw new Error('auditRollback.read 未绑定')
+  }
+}
+markDirectRemote(AuditStatusRemote.prototype, 'read')
+
+function exposeAuditRemote(ctx) {
+  try {
+    const service = new AuditStatusRemote()
+    service.name = 'auditRollback'
+    service.typertRemote = Object.freeze({
+      service,
+      serviceKey: 'auditRollback',
+      namespace: 'auditRollback',
+    })
+    // 实例方法覆盖原型，供 Gateway Reflect.get 调用；参数表仍以原型上的无参 read 为准。
+    service.read = function read() {
+      return queryAuditStatus(ctx)
+    }
+    if (typeof ctx.reflect?.provide === 'function') {
+      ctx.reflect.provide('auditRollback', service)
+    }
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['typert'], (scope) => {
+        const register = () => {
+          try {
+            if (typeof scope.typert?.register !== 'function') return undefined
+            return scope.typert.register({
+              package: auditStatusRemote.package,
+              face: 'host',
+              schemas: [],
+              model: { services: [], events: [], objects: [] },
+              invocations: auditStatusRemote.descriptors,
+            })
+          } catch (error) {
+            const message = error && error.message ? error.message : String(error)
+            scope.logger?.warn?.(`[audit-rollback] remote 描述符注册失败: ${message}`)
+            return undefined
+          }
+        }
+        if (typeof scope.effect === 'function') scope.effect(register)
+        else register()
+      })
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error)
+    ctx.logger?.warn?.(`[audit-rollback] 只读状态暴露失败: ${message}`)
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
   // initState 可能因 stateDir 父路径是文件（ENOTDIR）等原因失败：
   // 不抛错拖垮宿主，warn 降级——后续各事件处理器本就有 try/catch warn-only。
   let stateReady = true
+  let initError = null
   try {
     initState(config.stateDir)
   } catch (error) {
     stateReady = false
+    initError = error && error.message ? error.message : String(error)
     ctx.logger.warn(
-      `[audit-rollback] 状态目录初始化失败，捕获与记账将全部降级为 warn-only: ${error && error.message ? error.message : error}`,
+      `[audit-rollback] 状态目录初始化失败，捕获与记账将全部降级为 warn-only: ${initError}`,
     )
   }
+  // 只读诊断：记下本次 apply 的生效配置，供设置页与离线假 ctx 查询。不改变捕获语义。
+  runtimeByCtx.set(ctx, { config, stateReady, initError })
+  exposeAuditRemote(ctx)
 
   // 加载 banner（契约第 6.1 条）：stateDir、captureTools、captureMaxBytes、gitSnapshot 状态
   ctx.logger.info(

@@ -1,0 +1,7 @@
+url: https://github.com/KouzakiUmi/dsh-guard/tree/main/packages/dsh-auto-review-router
+name: KouzakiUmi/dsh-guard#dsh-auto-review-router
+category: security
+description:
+  en: 'Routes Auto review to a configured reviewer model, and falls back to the current session route when that config is incomplete.'
+  zh: '把 Auto 审查路由到配置指定的 reviewer 模型；配置不全时回退当前会话路由。'
+tarball: https://github.com/KouzakiUmi/dsh-guard/releases/latest/download/dsh-auto-review-router.tgz

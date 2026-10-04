@@ -109,6 +109,10 @@ node scripts/audit-rollback.mjs last     [--state <dir>] [--apply] [--force] [--
 | `excludeGlobs` | `['/node_modules/','/.git/','/.dsh-memory/','/.graphflow-cache/']` | 命中即不捕获：含通配符按 glob（`*` / `**` / `?`）对绝对路径全串匹配；不含通配符按路径片段（子串）匹配，默认排除依赖目录、版本库、记忆目录与缓存目录 |
 | `gitSnapshot` | `false` | 占位开关，未实现 |
 
+兼容范围：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0`。前半覆盖 `0.2.0` 的 rc 预发布；后半用带预发布标签的 `0.2.1-0` 放行 `0.2.1` 起、`0.3.0` 前的预发布（含本机 `0.2.1-alpha.1`）。只写前半段时，node-semver 匹配不到 `0.2.1-alpha.1`。
+
+设置页（「插件」分区，只读）从 Host 读取 `stateDir`、`state.json`、账本统计、对象库、最近捕获和生效配置。第一版不写配置。改配置写在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `- id: audit-rollback` 下；同 id 的 config 是整体替换，字段要写全。
+
 `excludeGlobs` 子串语义的边界（契约 §2.1 第 3 条）：不含通配符的模式是**区分大小写**的子串匹配——默认四项都带斜杠（`/.git/`），因此只命中路径中间的目录片段，**不会**命中目录本身不带尾斜杠的写法（如 `D:/proj/.git` 本身），也不会命中 `.GIT`（大小写不同）；反过来，若手写一个不带斜杠的模式（如 `.git`），会误伤 `.gitignore` 这类文件名——自定义时建议沿用带斜杠的写法。
 
 ## 未核实项
@@ -128,6 +132,7 @@ node scripts/audit-rollback.mjs last     [--state <dir>] [--apply] [--force] [--
 ```powershell
 node test/selftest.mjs       # 离线存储层 + CLI 断言（CAS 去重 / before 去重 / 回滚 / append-only / trash 防覆盖 / CLI --force 等 11 条）
 node test/plugin-smoke.mjs   # 假 ctx 桩冒烟：apply 不抛错 + 4 个事件注册 + 一轮事件流落账（含 before 哈希断言）
+node test/status.mjs         # 假 ctx 调用只读状态：账本 / objects / capture / 配置回显
 ```
 
 两者均把数据写在 `test/.tmp*` 下并在结束时清理，不会写 `~/.dsh`。

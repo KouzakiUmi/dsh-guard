@@ -65,8 +65,184 @@ export function normalizeConfig(raw) {
  * @param {object} ctx
  * @param {object} [rawConfig]
  */
+/**
+ * 只读诊断。假 ctx 可直接调用：若该 ctx 已经 apply 过，读当时记下的注册结果；
+ * 否则只按 `rawConfig ?? ctx.config` 回显配置与路由判定，注册状态为未观察。
+ * 不调用 registerAuto，不订阅事件。
+ * @param {object} ctx
+ * @param {object} [rawConfig]
+ */
+export function queryRouterStatus(ctx, rawConfig) {
+  const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
+  const config = live?.config ?? normalizeConfig(rawConfig ?? ctx?.config)
+  return {
+    plugin: 'dsh-auto-review-router',
+    enabled: config.enabled,
+    registration: {
+      observed: live !== undefined,
+      attempted: live?.attempted === true,
+      registered: live?.registered === true,
+      conflict: live?.conflict === true,
+      conflictWarning: live?.conflict === true ? CONFLICT_WARN : null,
+    },
+    route: describeRoute(config),
+    budget: {
+      maxContextBytes: config.maxContextBytes,
+      historyLimit: config.historyLimit,
+      timeoutMs: config.timeoutMs,
+      temperature: config.temperature,
+      logDecisions: config.logDecisions,
+    },
+  }
+}
+
+function describeRoute(config) {
+  const resolved = resolveReviewRoute(config, undefined)
+  if (resolved.ok && resolved.route.source === 'config') {
+    return {
+      source: 'config',
+      provider: resolved.route.provider,
+      model: resolved.route.model,
+      effort: resolved.route.reasoningEffort ?? null,
+      fallbackToSessionRoute: config.fallbackToSessionRoute,
+      rejection: null,
+    }
+  }
+  if (config.fallbackToSessionRoute) {
+    return {
+      source: 'session-fallback',
+      provider: null,
+      model: null,
+      effort: null,
+      fallbackToSessionRoute: true,
+      rejection: null,
+    }
+  }
+  return {
+    source: 'rejected',
+    provider: null,
+    model: null,
+    effort: null,
+    fallbackToSessionRoute: false,
+    rejection: resolved.ok ? null : resolved.reason,
+  }
+}
+
+function parseRouterStatus(value) {
+  if (!value || typeof value !== 'object' || value.plugin !== 'dsh-auto-review-router') {
+    throw new Error('Invalid auto-review-router status')
+  }
+  if (!value.registration || typeof value.registration.registered !== 'boolean' || typeof value.registration.conflict !== 'boolean') {
+    throw new Error('Invalid auto-review-router status.registration')
+  }
+  if (!value.route || typeof value.route.source !== 'string') throw new Error('Invalid auto-review-router status.route')
+  if (!value.budget || typeof value.budget.maxContextBytes !== 'number') throw new Error('Invalid auto-review-router status.budget')
+  return value
+}
+
+function statusCodec(typeSymbol, parse) {
+  return {
+    mode: 'strict',
+    typeSymbol,
+    schema: { parse },
+    create: () => ({ parse }),
+  }
+}
+
+/** 与 lib/client.js 的 remote 描述符对齐。Client 不能 import 本文件，改动时两边一起改。 */
+export const routerStatusRemote = {
+  package: 'dsh-auto-review-router',
+  descriptors: [
+    {
+      id: 'dsh-auto-review-router#autoReviewRouter/read',
+      service: 'autoReviewRouter',
+      namespace: 'autoReviewRouter',
+      method: 'read',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: statusCodec('dsh-auto-review-router#RouterStatus', parseRouterStatus),
+    },
+  ],
+}
+
+const runtimeByCtx = new WeakMap()
+const REMOTE_METHOD_KEY = '@deepseek-ai/dsh-typert-protocol/remote-methods'
+
+function markDirectRemote(prototype, method) {
+  const current = Object.getOwnPropertyDescriptor(prototype, REMOTE_METHOD_KEY)?.value
+  const methods = Array.isArray(current?.methods) ? current.methods : []
+  if (methods.some((item) => item.method === method)) return
+  Object.defineProperty(prototype, REMOTE_METHOD_KEY, {
+    configurable: true,
+    enumerable: false,
+    value: Object.freeze({
+      version: 1,
+      methods: Object.freeze([
+        ...methods,
+        Object.freeze({ method, invocation: Object.freeze({ kind: 'direct' }) }),
+      ]),
+    }),
+  })
+}
+
+class RouterStatusRemote {
+  read() {
+    throw new Error('autoReviewRouter.read 未绑定')
+  }
+}
+markDirectRemote(RouterStatusRemote.prototype, 'read')
+
+function exposeRouterRemote(ctx) {
+  try {
+    const service = new RouterStatusRemote()
+    service.name = 'autoReviewRouter'
+    service.typertRemote = Object.freeze({
+      service,
+      serviceKey: 'autoReviewRouter',
+      namespace: 'autoReviewRouter',
+    })
+    service.read = function read() {
+      return queryRouterStatus(ctx)
+    }
+    if (typeof ctx.reflect?.provide === 'function') {
+      ctx.reflect.provide('autoReviewRouter', service)
+    }
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['typert'], (scope) => {
+        const register = () => {
+          try {
+            if (typeof scope.typert?.register !== 'function') return undefined
+            return scope.typert.register({
+              package: routerStatusRemote.package,
+              face: 'host',
+              schemas: [],
+              model: { services: [], events: [], objects: [] },
+              invocations: routerStatusRemote.descriptors,
+            })
+          } catch (error) {
+            scope.logger?.warn?.(`auto-review-router: remote 描述符注册失败：${error instanceof Error ? error.message : String(error)}`)
+            return undefined
+          }
+        }
+        if (typeof scope.effect === 'function') scope.effect(register)
+        else register()
+      })
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`auto-review-router: 只读状态暴露失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
+  const snap = {
+    config,
+    attempted: false,
+    registered: false,
+    conflict: false,
+  }
+  runtimeByCtx.set(ctx, snap)
+  exposeRouterRemote(ctx)
   if (!config.enabled) {
     ctx.logger?.info?.('dsh-auto-review-router: 未启用（enabled: false），不注册 Auto 集成。')
     return
@@ -85,14 +261,17 @@ export function apply(ctx, rawConfig) {
   const handler = (exec, next) => reviewGate(ctx, config, state, exec, next)
   const removeListener = ctx.on('tools/pre-execute', handler, { prepend: true })
 
+  snap.attempted = true
   let removeAuto
   try {
     removeAuto = ctx.permissionPresets.registerAuto(() => {
       if (!state.accepting) throw new Error('auto-review-router: 集成正在关闭，拒绝选中 Auto')
     })
+    snap.registered = true
   } catch (error) {
     callDisposer(removeListener)
     if (isAutoConflict(error)) {
+      snap.conflict = true
       ctx.logger?.warn?.(CONFLICT_WARN)
       return
     }

@@ -22,6 +22,7 @@ const REQUIRED_FILES = {
 		"README.zh.md",
 		"cordis.patch.yml",
 		"lib/index.js",
+		"lib/client.js",
 		"lib/ledger.js",
 		"scripts/audit-rollback.mjs",
 	],
@@ -30,6 +31,7 @@ const REQUIRED_FILES = {
 		"README.zh.md",
 		"cordis.patch.yml",
 		"lib/index.js",
+		"lib/client.js",
 		"lib/policy.js",
 		"lib/context.js",
 	],
@@ -69,12 +71,14 @@ for (const name of names) {
 	else if (!existsSync(join(dir, patch))) fail(name, `dsh.bundle.patch 指向的文件不存在: ${patch}`);
 	else ok(name, `dsh.bundle.patch -> ${patch}`);
 
-	// 3. @deepseek-ai/* 只在 peerDependencies，且口径固定为 ">=0.2.0-rc.1 <0.3.0-0"
+	// 3. @deepseek-ai/* 只在 peerDependencies。范围必须显式带 0.2.1 预发布比较符，
+	//    否则 node-semver 匹配不到 0.2.1-alpha.1（设计契约 §4.1）。
+	const PEER_RANGE = ">=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0";
 	const peerRange = pkg.peerDependencies?.["@deepseek-ai/dsh"];
 	if (Object.keys(pkg.dependencies || {}).some((key) => key.startsWith("@deepseek-ai/"))) {
 		fail(name, "@deepseek-ai/* 出现在 dependencies —— 应只在 peerDependencies");
-	} else if (peerRange !== ">=0.2.0-rc.1 <0.3.0-0") {
-		fail(name, `peerDependencies["@deepseek-ai/dsh"] 应为 ">=0.2.0-rc.1 <0.3.0-0"，实际 ${peerRange}`);
+	} else if (peerRange !== PEER_RANGE) {
+		fail(name, `peerDependencies["@deepseek-ai/dsh"] 应为 "${PEER_RANGE}"，实际 ${peerRange}`);
 	} else {
 		ok(name, `peerDependencies["@deepseek-ai/dsh"] = "${peerRange}"`);
 	}

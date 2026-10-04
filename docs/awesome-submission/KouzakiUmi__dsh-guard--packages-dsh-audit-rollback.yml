@@ -1,0 +1,7 @@
+url: https://github.com/KouzakiUmi/dsh-guard/tree/main/packages/dsh-audit-rollback
+name: KouzakiUmi/dsh-guard#dsh-audit-rollback
+category: security
+description:
+  en: 'Records a persistent audit ledger and content-addressed pre-edit snapshots for file-tool edits, and rolls them back offline.'
+  zh: '为文件工具编辑保存持久审计账本与编辑前内容，并提供离线精确回滚。'
+tarball: https://github.com/KouzakiUmi/dsh-guard/releases/latest/download/dsh-audit-rollback.tgz
