@@ -20,7 +20,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+
+      # 仅隔离 CI 工作区：官方 API 测试依赖；不运行第三方安装脚本。
+      - name: Install test dependencies without lifecycle scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       # monorepo 裁定：版本来源是两个包各自的 version，且必须相等（见 docs/release-plan.md §2）。
       - name: Check package versions are equal and semver
@@ -89,6 +93,7 @@ jobs:
             ( cd "packages/$pkg" && npm pack --ignore-scripts --json > ../../pack-$pkg.json )
           done
           node scripts/prepare-release.mjs
+          node tools/check-packed.mjs
 
       # 只有 main 的 push 才上传发布产物（PR 与其它分支不进入发布链路）。
       - name: Upload verified release assets

@@ -4,8 +4,8 @@
  *
  * 覆盖：
  *   1. 语法检查：对所有 .js / .mjs 跑 `node --check`
- *   2. 自测执行：跑每个包的 test/selftest.mjs 与 test/plugin-smoke.mjs，记录退出码
- *   3. 硬约束：禁止 import 任何 @deepseek-ai/*；禁止第三方依赖
+ *   2. 自测执行：跑每个包的 test/*.mjs，记录退出码（辅助 loader 文件除外）
+ *   3. 硬约束：运行源码仅允许声明为 peer 的官方 API 依赖，不捆绑另一套核心
  *   4. 落地痕迹：禁止向 ~/.dsh 写入（配置默认值可以提及，但代码里不得直接写盘）
  *
  * 用法：node tools/verify.mjs [--pkg <name>] [--quiet]
@@ -42,7 +42,7 @@ function collectSources(dir) {
       return
     }
     for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.tmp') continue
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name.startsWith('.tmp')) continue
       const full = join(current, entry.name)
       if (entry.isDirectory()) walk(full)
       else if (/\.(mjs|js|cjs)$/.test(entry.name)) out.push(full)
@@ -78,7 +78,7 @@ function runNode(file) {
   }
 }
 
-const FORBIDDEN_IMPORT = /(?:from\s*['"]@deepseek-ai\/|require\(\s*['"]@deepseek-ai\/|import\(\s*['"]@deepseek-ai\/)/
+const OFFICIAL_IMPORT = /(?:from\s*['"]|require\(\s*['"]|import(?:\s*\(\s*|\s*)['"])(@deepseek-ai\/[^'"]+)/g
 const HOME_WRITE = /(?:writeFileSync|appendFileSync|mkdirSync|createWriteStream)\s*\([^)]*\.dsh/i
 
 const packagesDir = join(REPO, 'packages')
@@ -115,7 +115,12 @@ for (const pkg of packages) {
   }
 
   // 2. 自测
-  for (const candidate of ['test/selftest.mjs', 'test/plugin-smoke.mjs']) {
+  const testDir = join(pkgDir, 'test')
+  const discoveredTests = existsSync(testDir) ? readdirSync(testDir)
+    .filter(name => name.endsWith('.mjs') && !/^(bootstrap|runtime|helpers?)\.mjs$/.test(name) && !name.includes('helper'))
+    .map(name => `test/${name}`) : []
+  const tests = [...new Set(['test/selftest.mjs', 'test/plugin-smoke.mjs', ...discoveredTests])]
+  for (const candidate of tests) {
     const file = join(pkgDir, candidate)
     if (!existsSync(file)) {
       record(pkg, `自测 ${candidate}`, false, '文件缺失')
@@ -128,14 +133,20 @@ for (const pkg of packages) {
   // 3. 硬约束
   const violations = []
   const homeHits = []
+  const manifestForImports = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
   for (const file of sources) {
     const text = readFileSync(file, 'utf8')
     const rel = relative(pkgDir, file)
-    if (FORBIDDEN_IMPORT.test(text)) violations.push(rel)
+    if (!rel.startsWith(`test${process.platform === 'win32' ? '\\' : '/'}`)) {
+      for (const match of text.matchAll(OFFICIAL_IMPORT)) {
+        const packageName = match[1].split('/').slice(0, 2).join('/')
+        if (!manifestForImports.peerDependencies?.[packageName]) violations.push(`${rel}: ${packageName}`)
+      }
+    }
     if (HOME_WRITE.test(text)) homeHits.push(rel)
   }
-  record(pkg, '禁止 import @deepseek-ai/*', violations.length === 0,
-    violations.length === 0 ? '无' : violations.join(', '))
+  record(pkg, '官方 API import 均声明为 peer', violations.length === 0,
+    violations.length === 0 ? '无未声明依赖' : violations.join(', '))
   record(pkg, '禁止直接写 ~/.dsh', homeHits.length === 0,
     homeHits.length === 0 ? '无' : homeHits.join(', '))
 

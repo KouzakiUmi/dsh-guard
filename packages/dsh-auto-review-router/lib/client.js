@@ -1,6 +1,6 @@
 // dsh-auto-review-router —— 设置页（Client 侧，手写，零构建）
 //
-// 第一版只读：启用状态、Auto 注册结果、路由判定、预算。不写配置。
+// 官方 settings.describe/update 管理 Config；本页仅保存编辑草稿，不自建配置状态。
 // Remote 描述符与 Host lib/index.js 的 routerStatusRemote 对齐。
 
 window.__ModuleLoader__.load({
@@ -14,6 +14,14 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-auto-review-router'
     const zh = {
       nav: 'Auto 审查路由',
+      configuration: '配置', save: '保存', saving: '保存中…', cancel: '取消', saved: '已保存（即时生效）',
+      reloadConfig: '重新读取（丢弃草稿）', stale: '配置已过期，请重新读取后再应用修改。',
+      safety: '通过官方 Settings 保存。启用仅发布 Auto 选项，不自动更改当前权限或审批策略；关闭会将现有 Auto 会话文件权限收紧为只读。',
+      field_enabled: '启用', field_reviewerProvider: '审查 Provider', field_reviewerModel: '审查 Model', field_reviewerEffort: '审查 Effort',
+      field_fallbackToSessionRoute: '允许回退会话路由', field_maxContextBytes: '上下文字节预算', field_historyLimit: '历史条数预算',
+      field_includeProjectInstructions: '加入项目指令', field_temperature: '温度', field_timeoutMs: '超时（毫秒）', field_logDecisions: '记录审查决定',
+      required: '必填', range: '超出范围或不是合法整数', pair: 'provider 与 model 必须同时填写或同时留空', effortRoute: 'effort 需要完整审查路由', noFallbackRoute: '关闭回退时必须填写审查路由',
+      missingRevision: '缺少修订号，请重新读取', remoteFailed: '设置调用失败', readOnly: '设置不可写', noForm: '找不到唯一活动配置条目',
       title: 'Auto 审查路由',
       refresh: '刷新',
       refreshing: '刷新中…',
@@ -39,10 +47,18 @@ window.__ModuleLoader__.load({
       conflictAdvice: '禁用本插件或官方 dsh-experimental-auto-review 中的一个。不要与 dsh-codex-connect 的 enableAutoReview 同时启用。',
       budget: '预算',
       guidance: '修改指引',
-      guidanceBody: '改配置写在 ~/.dsh/profiles/<profile>/cordis.patch.yml 的 - id: auto-review-router 下。同 id 的 config 是整体替换，字段要写全。启用后侧栏权限选择器会出现 Auto，且不得与官方 auto-review 或 dsh-codex-connect 的 enableAutoReview 同时启用。',
+      guidanceBody: '使用上方表单通过官方 Settings 保存，持久化由 ConfigEditor 负责。字段校验失败或配置过期时不会覆盖。',
     }
     const en = {
       nav: 'Auto review router',
+      configuration: 'Configuration', save: 'Save', saving: 'Saving…', cancel: 'Cancel', saved: 'Saved (applies live)',
+      reloadConfig: 'Reload config (discard draft)', stale: 'Configuration is stale; reload before reapplying edits.',
+      safety: 'Official Settings owns persistence. Enabling only publishes Auto, without changing current permissions or approval policy. Disabling narrows existing Auto sessions to read-only file access.',
+      field_enabled: 'Enabled', field_reviewerProvider: 'Reviewer provider', field_reviewerModel: 'Reviewer model', field_reviewerEffort: 'Reviewer effort',
+      field_fallbackToSessionRoute: 'Allow session-route fallback', field_maxContextBytes: 'Context byte budget', field_historyLimit: 'History item budget',
+      field_includeProjectInstructions: 'Include project instructions', field_temperature: 'Temperature', field_timeoutMs: 'Timeout (ms)', field_logDecisions: 'Log review decisions',
+      required: 'Required', range: 'Out of range or invalid integer', pair: 'Provider and model must both be filled or empty', effortRoute: 'Effort requires a complete reviewer route', noFallbackRoute: 'A reviewer route is required when fallback is off',
+      missingRevision: 'Missing revision; reload configuration', remoteFailed: 'Settings request failed', readOnly: 'Settings are read-only', noForm: 'No unique active configuration entry',
       title: 'Auto review router',
       refresh: 'Refresh',
       refreshing: 'Refreshing…',
@@ -68,7 +84,7 @@ window.__ModuleLoader__.load({
       conflictAdvice: 'Disable either this plugin or official dsh-experimental-auto-review. Do not enable it together with dsh-codex-connect enableAutoReview.',
       budget: 'Budget',
       guidance: 'How to change config',
-      guidanceBody: 'Write config under - id: auto-review-router in ~/.dsh/profiles/<profile>/cordis.patch.yml. Config for the same id is replaced as a whole; include every field. After enabling, the sidebar permission picker shows Auto. Do not enable it together with official auto-review or dsh-codex-connect enableAutoReview.',
+      guidanceBody: 'Use the form above. Official Settings and ConfigEditor own persistence and revision checks. Refused or stale edits never overwrite current configuration.',
     }
 
     function parseStatus(value) {
@@ -126,7 +142,51 @@ window.__ModuleLoader__.load({
       return t('sourceRejected')
     }
 
-    function RouterPage({ call, t }) {
+    const formFields = [
+      ['enabled', 'boolean'], ['reviewerProvider', 'string'], ['reviewerModel', 'string'], ['reviewerEffort', 'string'],
+      ['fallbackToSessionRoute', 'boolean'], ['maxContextBytes', 'number', 1, 1048576], ['historyLimit', 'number', 0, 1000],
+      ['includeProjectInstructions', 'boolean'], ['temperature', 'number', 0, 2], ['timeoutMs', 'number', 1, 300000], ['logDecisions', 'boolean'],
+    ]
+    function validateDraft(draft, t = key => zh[key] || key) {
+      const values = {}
+      for (const [key, type, min, max] of formFields) {
+        if (type === 'number') {
+          if (String(draft[key]).trim() === '') throw new Error(`${key}: ${t('required')}`)
+          const value = Number(draft[key])
+          if (!Number.isFinite(value) || value < min || value > max || (key !== 'temperature' && !Number.isInteger(value))) throw new Error(`${key}: ${t('range')} (${min}–${max})`)
+          values[key] = value
+        } else if (type === 'boolean') {
+          if (typeof draft[key] !== 'boolean') throw new Error(`${key}: boolean required`)
+          values[key] = draft[key]
+        } else values[key] = String(draft[key] ?? '').trim()
+      }
+      if (Boolean(values.reviewerProvider) !== Boolean(values.reviewerModel)) throw new Error(t('pair'))
+      if (values.reviewerEffort && !values.reviewerProvider) throw new Error(t('effortRoute'))
+      if (values.enabled && !values.fallbackToSessionRoute && !values.reviewerProvider) throw new Error(t('noFallbackRoute'))
+      return values
+    }
+    function unwrap(result, t = key => zh[key] || key) {
+      if (result?.ok === true) return result.value
+      const error = new Error(result?.error?.message || t('remoteFailed'))
+      error.code = result?.error?.code
+      throw error
+    }
+    function createSettingsIO(service, t = key => zh[key] || key) {
+      return {
+        async read() {
+          const result = unwrap(await service.describe(), t)
+          if (!result.writable) throw new Error(t('readOnly'))
+          const matches = result.namespaces.filter(row => row.ns === 'auto-review-router')
+          if (matches.length !== 1) throw new Error(t('noForm'))
+          return matches[0]
+        },
+        async save(form, draft) {
+          if (!Number.isInteger(form?.revision)) throw new Error(t('missingRevision'))
+          return unwrap(await service.update(form.ns, validateDraft(draft, t), form.revision), t)
+        },
+      }
+    }
+    function RouterPage({ call, settings, t }) {
       const [status, setStatus] = react.useState(null)
       const [error, setError] = react.useState('')
       const [busy, setBusy] = react.useState(false)
@@ -141,6 +201,33 @@ window.__ModuleLoader__.load({
       }, [call])
       react.useEffect(() => { load() }, [load])
 
+      const [form, setForm] = react.useState(null)
+      const [draft, setDraft] = react.useState(null)
+      const [formError, setFormError] = react.useState('')
+      const [saving, setSaving] = react.useState(false)
+      const [notice, setNotice] = react.useState('')
+      const reloadForm = react.useCallback(async () => {
+        setSaving(true)
+        setFormError('')
+        try {
+          const value = await settings.read()
+          setForm(value); setDraft({ ...value.value }); setNotice('')
+        } catch (error) { setFormError(error.message) }
+        finally { setSaving(false) }
+      }, [settings])
+      react.useEffect(() => { reloadForm() }, [reloadForm])
+      const save = async () => {
+        setSaving(true); setFormError(''); setNotice('')
+        try {
+          const value = await settings.save(form, draft)
+          setForm(value); setDraft({ ...value.value }); setNotice(t('saved'))
+          await load()
+        } catch (error) {
+          // Never advance the revision or discard edits after a refusal.
+          setFormError(error.code === 'settings/conflict' ? `${t('stale')} ${error.message}` : error.message)
+        } finally { setSaving(false) }
+      }
+      const dirty = !!form && JSON.stringify(draft) !== JSON.stringify(form.value)
       const reg = status ? status.registration : null
       const route = status ? status.route : null
       return h('div', { style: pageStyle },
@@ -148,8 +235,29 @@ window.__ModuleLoader__.load({
           h('h2', { style: { margin: 0, fontSize: 16 } }, t('title')),
           h('button', { type: 'button', disabled: busy, style: btnStyle, onClick: () => load() }, busy ? t('refreshing') : t('refresh')),
         ),
+        h('section', { style: cardStyle },
+          h('h3', null, t('configuration')),
+          h('p', null, t('safety')),
+          formError ? h('p', { role: 'alert', style: { color: '#dc2626' } }, formError) : null,
+          notice ? h('p', { role: 'status' }, notice) : null,
+          draft ? h('form', { onSubmit: (event) => { event.preventDefault(); if (!saving) save() } },
+            ...formFields.map(([key, type, min, max]) => h('label', { key, style: { display: 'flex', alignItems: 'center', gap: 10, margin: '8px 0' } },
+              h('span', { style: { minWidth: 185 } }, t('field_' + key)),
+              h('input', {
+                'aria-label': key, type: type === 'boolean' ? 'checkbox' : type === 'number' ? 'number' : 'text',
+                disabled: saving, ...(type === 'boolean' ? { checked: draft[key] === true } : { value: draft[key] ?? '' }),
+                ...(type === 'number' ? { min, max, step: key === 'temperature' ? 'any' : 1 } : {}),
+                onChange: (event) => setDraft(previous => ({ ...previous, [key]: type === 'boolean' ? event.target.checked : event.target.value })),
+              }),
+            )),
+            h('button', { type: 'submit', disabled: saving || !dirty, style: btnStyle }, saving ? t('saving') : t('save')),
+            h('button', { type: 'button', disabled: saving || !dirty, style: btnStyle, onClick: () => { setDraft({ ...form.value }); setFormError(''); setNotice('') } }, t('cancel')),
+          ) : null,
+          h('button', { type: 'button', disabled: saving, style: btnStyle, onClick: reloadForm }, t('reloadConfig')),
+        ),
         error ? h('p', { role: 'alert', style: { color: '#dc2626', overflowWrap: 'anywhere' } }, error) : null,
         !status && !error ? h('p', null, busy ? t('loading') : t('empty')) : null,
+        reg?.error ? h('p', { role: 'alert', style: warnStyle }, reg.error) : null,
         reg && reg.conflict ? h('section', { role: 'alert', style: warnStyle },
           h('strong', null, t('conflictTitle')),
           h('p', { style: { margin: '6px 0 0' } }, reg.conflictWarning || t('conflictBody')),
@@ -186,7 +294,7 @@ window.__ModuleLoader__.load({
     }
 
     const name = 'dsh-auto-review-router'
-    const inject = ['slots', 'locale', 'remote']
+    const inject = ['slots', 'locale', 'remote', 'remote.settings']
     function apply(ctx) {
       console.info('[dsh-auto-review-router] client 已加载')
       try {
@@ -228,13 +336,13 @@ window.__ModuleLoader__.load({
       }
       // 注册字段对齐官方范本（dsh-client-ui-settings-plugins / plugin-inventory）：name/id/order/label/locale/inject。
       // locale: NS 让槽渲染器把 label 绑定到本包字典命名空间并随语言切换刷新。
+      const settingsIO = createSettingsIO(ctx.get('remote.settings'), t)
       const entry = {
-        id: 'auto-review-router',
         tabId: 'auto-review-router-tab',
         order: 50,
         label: () => t('nav'),
         locale: NS,
-        inject: () => ({ call, t }),
+        inject: () => ({ call, settings: settingsIO, t }),
       }
       // ctx.slots.inject 是等待语义：槽未声明时回调不执行、不抛错（renderer Slots.inject 用
       // subscribeDeclaration 等待声明），因此 try/catch 回退永远不触发；诊断只能靠探针 + 日志。
@@ -250,22 +358,23 @@ window.__ModuleLoader__.load({
         console.info(`[dsh-auto-review-router] 已注册设置页: slot=${slot} id=${id} order=${entry.order}`)
         return dispose
       })
-      // 主入口：settings.section —— settings-shell 顶层声明的 list 槽，官方 general/models/plugins
-      // 与第三方 subusage 均注册于此，是设置侧栏导航的确定存在入口。
-      registerInto('settings.section', entry.id)
-      console.info('[dsh-auto-review-router] settings.section 主入口已挂 inject 等待')
-      // 可选附加：settings.plugins.tab 由 dsh-client-ui-settings-plugins 的 section children 声明，
+      // 唯一入口：设置 → 内置插件；不再注册设置侧栏独立页面。
+      // settings.plugins.tab 由 dsh-client-ui-settings-plugins 的 section children 声明，
       // 存在性取决于该内置包是否启用。用 ctx.slots.spec()（Slots 服务公开方法，未声明返回 undefined）
       // 打探针日志；注册本身仍走 inject 等待，以兼容该槽晚于本包声明的启动顺序。
       const tabSpec = typeof ctx.slots.spec === 'function' ? ctx.slots.spec('settings.plugins.tab') : undefined
       if (tabSpec !== undefined) {
-        console.info('[dsh-auto-review-router] 探针: settings.plugins.tab 已声明，附加注册插件页签')
+        console.info('[dsh-auto-review-router] 探针: settings.plugins.tab 已声明，注册内置插件插件页签')
       } else {
-        console.warn('[dsh-auto-review-router] 探针: settings.plugins.tab 当前未声明，附加注册挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
+        console.warn('[dsh-auto-review-router] 探针: settings.plugins.tab 当前未声明，注册内置插件挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
       }
       registerInto('settings.plugins.tab', entry.tabId)
     }
 
+    exports.dictionaries = { zh, en }
+    exports.validateDraft = validateDraft
+    exports.createSettingsIO = createSettingsIO
+    exports.RouterPage = RouterPage
     exports.apply = apply
     exports.inject = inject
     exports.name = name

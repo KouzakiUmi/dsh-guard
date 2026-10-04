@@ -1,6 +1,17 @@
 # 设计契约 · 插件设置 UI 与商店收录（2026-10-04）
 
-> 本文件是本次工作的唯一真源。凡标「已核实」的 API 事实直接采信，不要重新猜。
+> 历史第一版设计（2026-10-04）。本轮可编辑设置修订见下节；旧 API 说明必须以目标安装版本复核，不能直接当作当前规范。
+
+## 可编辑设置修订（2026-10-05）
+
+- 第一版仅显示状态，缺少配置保存能力，不能满足当前用户诉求。
+- 原 §3 “Config 运行时不可变、迁移 settings 命名空间”的推断不成立：目标核心 0.2.1-alpha.1 的官方 Settings 支持 Config `.volatile()` 字段、revision 冲突检查与 profile patch 持久化。业务使用引用 `.get()` 读取运行时值，不额外建配置文件。
+- 两包新增官方 Config schema、可编辑表单、保存/取消、字段校验、错误与保存反馈；保留状态 remote。按用户的系统级插件分类，0.2.1 统一只注册 `settings.plugins.tab`（设置 → 内置插件），撤回 `settings.section` 独立入口；容器晚声明时等待，不能同时注册或另建回退页面。
+- 审计固定每轮快照；stateDir 普通字段不热切换，未实现 gitSnapshot 不提供可用开关。审查固定每次请求快照；启停不得把会话自动提升到完全访问，也不得改变用户 approval policy。
+- schema 等官方 API 作为 peer 声明，撤销旧版一律禁止 `@deepseek-ai/*` 导入的自设限制；禁止捆绑核心副本或手工改真实 profile 依赖树。
+- 设置验收增加真实隔离 Loader/Settings/ConfigEditor 组合、编辑/保存/冲突/热生效回归。当前真实 GUI 上线验收另列，不由离线通过推定。
+
+---
 > 参考仓库：`D:\dsh-subusage`（手写 client.js、已被精选列表收录的同类插件）。
 
 - 仓库：`D:\dsh-guard`（remote `origin` = https://github.com/KouzakiUmi/dsh-guard）

@@ -18,7 +18,8 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { apply, inject, name } from '../lib/index.js'
+import './bootstrap.mjs'
+const { apply, inject, name } = await import('../lib/index.js')
 import { readAllEntries, sha1Hex } from '../lib/ledger.js'
 
 const testDir = dirname(fileURLToPath(import.meta.url))

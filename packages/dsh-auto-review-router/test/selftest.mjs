@@ -4,7 +4,8 @@
 import { Buffer } from 'node:buffer'
 
 import { buildReviewContext } from '../lib/context.js'
-import { apply } from '../lib/index.js'
+import './runtime.mjs'
+const { apply } = await import('../lib/index.js')
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.js'
 
 let failed = 0

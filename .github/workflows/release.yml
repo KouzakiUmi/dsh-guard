@@ -25,7 +25,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+
+      # 与 CI 一致的隔离测试依赖，不运行生命周期脚本。
+      - name: Install test dependencies without lifecycle scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       # tag 必须等于 v<version>，且两包 version 相同（monorepo 裁定，见 docs/release-plan.md §4）。
       - name: Check tag matches package versions
@@ -92,6 +96,7 @@ jobs:
             ( cd "packages/$pkg" && npm pack --ignore-scripts --json > ../../pack-$pkg.json )
           done
           node scripts/prepare-release.mjs
+          node tools/check-packed.mjs
 
       - name: Create versioned GitHub Release
         uses: softprops/action-gh-release@v2

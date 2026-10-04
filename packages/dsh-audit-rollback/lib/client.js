@@ -1,6 +1,6 @@
 // dsh-audit-rollback —— 设置页（Client 侧，手写，零构建）
 //
-// 第一版只读：状态、账本、对象库、最近捕获、生效配置。不写配置。
+// 状态读取保留独立 remote；配置只走官方 remote.settings 的 revision 读写。
 // Remote 描述符与 Host lib/index.js 的 auditStatusRemote 对齐。
 
 window.__ModuleLoader__.load({
@@ -49,9 +49,25 @@ window.__ModuleLoader__.load({
       colHash: 'hash 前 8 位',
       colBytes: '字节',
       config: '生效配置',
-      guidance: '修改指引',
-      guidanceBody: '改配置写在 ~/.dsh/profiles/<profile>/cordis.patch.yml 的 - id: audit-rollback 下。同 id 的 config 是整体替换，字段要写全。',
+
       gitNote: 'gitSnapshot 当前为 true，但影子 git 快照本阶段未实现。',
+      editorTitle: '捕获策略设置',
+      editorLimits: 'stateDir 只读，不支持热迁移；gitSnapshot 未实现，不可设置。列表每行一项。保存仅对新轮次生效。',
+      captureTools: '捕获工具名（captureTools）',
+      captureMaxBytes: '单文件捕获上限（captureMaxBytes，字节）',
+      argsMaxBytes: '参数预览上限（argsMaxBytes，字节）',
+      logCalls: '记录工具调用（logCalls）',
+      excludeGlobs: '排除规则（excludeGlobs）',
+      save: '保存',
+      saving: '处理中…',
+      cancelReload: '取消并重新读取',
+      loadConfig: '读取配置',
+      saved: '已保存到官方 profile；新轮次生效，进行中轮次保持原配置。',
+      stale: '配置已过期，未覆盖其他修改；草稿保留。请取消并重新读取后再编辑。',
+      settingsUnavailable: '官方 settings 服务未就绪，请确认 settings/configEditor 已启用。',
+      settingsNotWritable: 'audit-rollback 配置不可写，请确认官方 settings/configEditor 已启用且插件处于 ACTIVE。',
+      positiveInteger: '必须是正安全整数',
+      toolsRequired: '至少需要一个工具名',
     }
     const en = {
       nav: 'Audit & rollback',
@@ -90,9 +106,25 @@ window.__ModuleLoader__.load({
       colHash: 'Hash prefix',
       colBytes: 'Bytes',
       config: 'Effective config',
-      guidance: 'How to change config',
-      guidanceBody: 'Write config under - id: audit-rollback in ~/.dsh/profiles/<profile>/cordis.patch.yml. Config for the same id is replaced as a whole; include every field.',
+
       gitNote: 'gitSnapshot is true, but the shadow git snapshot is not implemented in this phase.',
+      editorTitle: 'Capture policy settings',
+      editorLimits: 'stateDir is read-only: live migration is unsupported. gitSnapshot is unavailable. One list item per line. Saves apply to new turns only.',
+      captureTools: 'Capture tool names (captureTools)',
+      captureMaxBytes: 'File capture limit (captureMaxBytes, bytes)',
+      argsMaxBytes: 'Argument preview limit (argsMaxBytes, bytes)',
+      logCalls: 'Log tool calls (logCalls)',
+      excludeGlobs: 'Exclude patterns (excludeGlobs)',
+      save: 'Save',
+      saving: 'Working…',
+      cancelReload: 'Cancel & reload',
+      loadConfig: 'Load configuration',
+      saved: 'Saved to the official profile. New turns use this policy; in-flight turns retain their snapshot.',
+      stale: 'Stale revision: no concurrent edits overwritten; draft retained. Cancel and reload, then edit again.',
+      settingsUnavailable: 'Official settings service unavailable; enable settings/configEditor.',
+      settingsNotWritable: 'audit-rollback is not writable; ensure settings/configEditor and the ACTIVE plugin are enabled.',
+      positiveInteger: 'must be a positive safe integer',
+      toolsRequired: 'at least one tool name is required',
     }
 
     function parseStatus(value) {
@@ -146,7 +178,96 @@ window.__ModuleLoader__.load({
       return String(value)
     }
 
-    function AuditPage({ call, t }) {
+    const editableFields = ['captureTools', 'captureMaxBytes', 'argsMaxBytes', 'logCalls', 'excludeGlobs']
+    function toDraft(value) {
+      return {
+        captureTools: (value.captureTools || []).join('\n'),
+        excludeGlobs: (value.excludeGlobs || []).join('\n'),
+        captureMaxBytes: String(value.captureMaxBytes),
+        argsMaxBytes: String(value.argsMaxBytes),
+        logCalls: value.logCalls === true,
+      }
+    }
+    function validateDraft(draft, t = (key) => en[key] || key) {
+      const value = { logCalls: draft.logCalls === true }
+      for (const key of ['captureMaxBytes', 'argsMaxBytes']) {
+        const n = Number(draft[key])
+        if (!Number.isSafeInteger(n) || n < 1) throw new Error(key + ': ' + t('positiveInteger'))
+        value[key] = n
+      }
+      for (const key of ['captureTools', 'excludeGlobs']) {
+        value[key] = String(draft[key]).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+      }
+      if (!value.captureTools.length) throw new Error('captureTools: ' + t('toolsRequired'))
+      return value
+    }
+    function unwrapSettings(result) {
+      if (result && result.ok === true) return result.value
+      const detail = result && result.error
+      const error = new Error(detail && detail.message || 'Settings request failed')
+      error.code = detail && detail.code
+      throw error
+    }
+    function SettingsEditor({ settingsCall, t, onSaved }) {
+      const [view, setView] = react.useState(null)
+      const [draft, setDraft] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [error, setError] = react.useState('')
+      const [message, setMessage] = react.useState('')
+      const accept = (row) => { setView(row); setDraft(toDraft(row.value)) }
+      const reload = async () => {
+        setBusy(true); setError(''); setMessage('')
+        try {
+          const result = await settingsCall('describe')
+          const row = result.namespaces.find((item) => item.ns === 'audit-rollback')
+          if (!row || !result.writable) throw new Error(t('settingsNotWritable'))
+          accept(row)
+        } catch (err) { setError(err.message || String(err)) }
+        finally { setBusy(false) }
+      }
+      react.useEffect(() => { reload() }, [settingsCall])
+      const save = async () => {
+        setError(''); setMessage('')
+        let patch
+        try { patch = validateDraft(draft, t) }
+        catch (err) { setError(err.message); return }
+        setBusy(true)
+        try {
+          // Revision is held with the draft, never replaced by a background refresh.
+          const row = await settingsCall('update', 'audit-rollback', patch, view.revision)
+          accept(row)
+          setMessage(t('saved'))
+          // Diagnostics refresh must never turn an accepted write into a save failure.
+          if (onSaved) Promise.resolve().then(onSaved).catch(() => {})
+        } catch (err) {
+          setError((err.code === 'settings/conflict' || err.code === 'SETTINGS_CONFLICT'
+            ? t('stale') + ' ' : '') + (err.message || String(err)))
+        } finally { setBusy(false) }
+      }
+      const field = (key) => h('label', { key, style: { display: 'block', marginTop: 8 } },
+        h('span', null, t(key)),
+        key === 'logCalls'
+          ? h('input', { type: 'checkbox', 'aria-label': key, checked: draft[key], disabled: busy, onChange: (e) => { setDraft({ ...draft, [key]: e.target.checked }); setMessage('') } })
+          : h(key === 'captureTools' || key === 'excludeGlobs' ? 'textarea' : 'input', {
+              value: draft[key], disabled: busy, type: 'number', min: 1, step: 1,
+              rows: 4, 'aria-label': key, style: { display: 'block', width: '100%', boxSizing: 'border-box' },
+              onChange: (e) => { setDraft({ ...draft, [key]: e.target.value }); setMessage('') },
+            }),
+      )
+      return h('section', { style: cardStyle },
+        h('h3', null, t('editorTitle')),
+        h('p', null, t('editorLimits')),
+        error ? h('p', { role: 'alert', style: { color: '#dc2626' } }, error) : null,
+        message ? h('p', { role: 'status' }, message) : null,
+        draft ? h('form', { onSubmit: (e) => { e.preventDefault(); save() } },
+          ...editableFields.map(field),
+          h('button', { type: 'submit', disabled: busy, style: btnStyle }, busy ? t('saving') : t('save')),
+          h('button', { type: 'button', disabled: busy, style: btnStyle, onClick: reload }, t('cancelReload')),
+        ) : h('button', { type: 'button', disabled: busy, onClick: reload }, t('loadConfig')),
+      )
+    }
+
+    function AuditPage({ call, settingsCall, t }) {
       const [status, setStatus] = react.useState(null)
       const [error, setError] = react.useState('')
       const [busy, setBusy] = react.useState(false)
@@ -226,10 +347,7 @@ window.__ModuleLoader__.load({
           line('gitSnapshot', show(status.config.gitSnapshot)),
           status.config.gitSnapshot ? h('p', { style: { color: '#b7791f' } }, t('gitNote')) : null,
         ) : null,
-        h('section', { style: cardStyle },
-          h('h3', { style: { margin: '0 0 6px', fontSize: 14 } }, t('guidance')),
-          h('p', { style: { margin: 0 } }, t('guidanceBody')),
-        ),
+        h(SettingsEditor, { settingsCall, t, onSaved: load }),
       )
     }
 
@@ -274,15 +392,19 @@ window.__ModuleLoader__.load({
           await new Promise((resolve) => setTimeout(resolve, 250))
         }
       }
+      const settingsCall = async (method, ...args) => {
+        const service = ctx.get('remote.settings')
+        if (!service || typeof service[method] !== 'function') throw new Error(t('settingsUnavailable'))
+        return unwrapSettings(await service[method](...args))
+      }
       // 注册字段对齐官方范本（dsh-client-ui-settings-plugins / plugin-inventory）：name/id/order/label/locale/inject。
       // locale: NS 让槽渲染器把 label 绑定到本包字典命名空间并随语言切换刷新。
       const entry = {
-        id: 'audit-rollback',
         tabId: 'audit-rollback-tab',
         order: 40,
         label: () => t('nav'),
         locale: NS,
-        inject: () => ({ call, t }),
+        inject: () => ({ call, settingsCall, t }),
       }
       // ctx.slots.inject 是等待语义：槽未声明时回调不执行、不抛错（renderer Slots.inject 用
       // subscribeDeclaration 等待声明），因此 try/catch 回退永远不触发；诊断只能靠探针 + 日志。
@@ -298,22 +420,24 @@ window.__ModuleLoader__.load({
         console.info(`[dsh-audit-rollback] 已注册设置页: slot=${slot} id=${id} order=${entry.order}`)
         return dispose
       })
-      // 主入口：settings.section —— settings-shell 顶层声明的 list 槽，官方 general/models/plugins
-      // 与第三方 subusage 均注册于此，是设置侧栏导航的确定存在入口。
-      registerInto('settings.section', entry.id)
-      console.info('[dsh-audit-rollback] settings.section 主入口已挂 inject 等待')
-      // 可选附加：settings.plugins.tab 由 dsh-client-ui-settings-plugins 的 section children 声明，
+      // 唯一入口：设置 → 内置插件；不再注册设置侧栏独立页面。
+      // settings.plugins.tab 由 dsh-client-ui-settings-plugins 的 section children 声明，
       // 存在性取决于该内置包是否启用。用 ctx.slots.spec()（Slots 服务公开方法，未声明返回 undefined）
       // 打探针日志；注册本身仍走 inject 等待，以兼容该槽晚于本包声明的启动顺序。
       const tabSpec = typeof ctx.slots.spec === 'function' ? ctx.slots.spec('settings.plugins.tab') : undefined
       if (tabSpec !== undefined) {
-        console.info('[dsh-audit-rollback] 探针: settings.plugins.tab 已声明，附加注册插件页签')
+        console.info('[dsh-audit-rollback] 探针: settings.plugins.tab 已声明，注册内置插件插件页签')
       } else {
-        console.warn('[dsh-audit-rollback] 探针: settings.plugins.tab 当前未声明，附加注册挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
+        console.warn('[dsh-audit-rollback] 探针: settings.plugins.tab 当前未声明，注册内置插件挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
       }
       registerInto('settings.plugins.tab', entry.tabId)
     }
 
+    // Pure client helpers exported for the zero-build VM/UI contract tests.
+    exports.dictionaries = { zh, en }
+    exports.SettingsEditor = SettingsEditor
+    exports.validateDraft = validateDraft
+    exports.unwrapSettings = unwrapSettings
     exports.apply = apply
     exports.inject = inject
     exports.name = name

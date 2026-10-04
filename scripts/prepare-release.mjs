@@ -20,6 +20,7 @@ const REQUIRED_FILES = {
 		"cordis.patch.yml",
 		"lib/index.js",
 		"lib/client.js",
+		"lib/config.js",
 		"lib/ledger.js",
 		"scripts/audit-rollback.mjs",
 	],
@@ -29,6 +30,7 @@ const REQUIRED_FILES = {
 		"cordis.patch.yml",
 		"lib/index.js",
 		"lib/client.js",
+		"lib/config.js",
 		"lib/policy.js",
 		"lib/context.js",
 	],
@@ -63,13 +65,17 @@ export function validatePack(name, info) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const dist = resolve(root, "dist");
-	// dist 只保留本次校验过的产物，避免旧 tarball 混入 Release 资产
+	// 先验证所有输入和源 tarball，再替换本仓库的固定 dist 目录；验证失败保留旧产物。
+	const packs = Object.keys(REQUIRED_FILES).map((name) => {
+		const manifest = resolve(root, `pack-${name}.json`);
+		const pack = validatePack(name, JSON.parse(readFileSync(manifest, "utf8")));
+		if (!statSync(join(root, "packages", name, pack.filename)).isFile()) throw new Error(`${name}: tarball 不是文件`);
+		return [name, pack];
+	});
 	rmSync(dist, { recursive: true, force: true });
 	mkdirSync(dist, { recursive: true });
 
-	for (const name of Object.keys(REQUIRED_FILES)) {
-		const manifest = resolve(root, `pack-${name}.json`);
-		const pack = validatePack(name, JSON.parse(readFileSync(manifest, "utf8")));
+	for (const [name, pack] of packs) {
 		const asset = join(dist, `${name}.tgz`);
 		// npm pack 的 tarball 生成在包目录下（见 CI 的 (cd packages/$pkg && npm pack ...)）
 		copyFileSync(join(root, "packages", name, pack.filename), asset);

@@ -9,7 +9,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { apply, queryAuditStatus, auditStatusRemote } from '../lib/index.js'
+import './bootstrap.mjs'
+const { apply, queryAuditStatus, auditStatusRemote } = await import('../lib/index.js')
 import { appendEntry, capturePath, initState, putObject, sha1Hex } from '../lib/ledger.js'
 
 const testDir = dirname(fileURLToPath(import.meta.url))
@@ -119,7 +120,7 @@ ok('apply 后的假 ctx 读到本次生效配置，且不要求 reflect/inject',
   assert.equal(status.ledger.entryCount, 6)
 })
 
-ok('client 描述符与 host 逐字段全等，且两端都没有核心包 import', () => {
+ok('client 描述符与 host 逐字段全等，且不直接 import 核心', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const host = readFileSync(join(testDir, '..', 'lib', 'index.js'), 'utf8')
   const descriptor = auditStatusRemote.descriptors[0]
@@ -155,26 +156,19 @@ ok('client 描述符与 host 逐字段全等，且两端都没有核心包 impor
   assert.equal(forbidden.test(host), false)
 })
 
-ok('client 设置页注册契约：settings.section 主入口 + plugins.tab 探针附加', () => {
+ok('client 设置页注册契约：仅内置插件页签，无独立侧栏入口', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const grab = (pattern, field) => {
     const match = client.match(pattern)
     assert.ok(match, `client.js 未找到设置页注册字段 ${field}`)
     return match[1]
   }
-  // 实机验证结论：plugins.tab 单独注册会静默不出现（inject 等待语义，try/catch 回退不触发），
-  // 因此 settings.section 必须是主入口且在前，plugins.tab 降级为探针可选附加。
+  // 系统级插件只贡献一个内置插件页签；槽晚声明也不得另建侧栏回退入口。
   const registrations = [...client.matchAll(/registerInto\('([^']+)', entry\.(\w+)\)/g)]
     .map((match) => ({ slot: match[1], idField: match[2] }))
-  assert.deepEqual(registrations, [
-    { slot: 'settings.section', idField: 'id' },
-    { slot: 'settings.plugins.tab', idField: 'tabId' },
-  ])
-  // 两个槽的注册 id 必须不同（同一 id 跨槽注册虽合法，但区分 id 便于日志定位）。
-  // 描述符 id 含 '#' 被 [^'#]+ 排除，首个匹配即 entry.id。
-  const entryId = grab(/\bid:\s*'([^'#]+)'/, 'entry.id')
-  const tabId = grab(/\btabId:\s*'([^']+)'/, 'entry.tabId')
-  assert.notEqual(entryId, tabId)
+  assert.deepEqual(registrations, [{ slot: 'settings.plugins.tab', idField: 'tabId' }])
+  assert.equal(client.includes("'settings.section'"), false)
+  assert.equal(grab(/\btabId:\s*'([^']+)'/, 'entry.tabId'), 'audit-rollback-tab')
   // 注册字段对齐官方范本：label 走 t('nav')，且 locale 命名空间随注册提交（entry 与 register 各一处代码行）。
   assert.equal(grab(/\blabel:\s*\(\) => t\('([^']+)'\)/, 'label key'), 'nav')
   assert.equal([...client.matchAll(/^\s*locale:\s*NS,$/gm)].length, 2)

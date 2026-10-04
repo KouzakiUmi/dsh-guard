@@ -201,7 +201,7 @@ PENDING_ACTION
 
 ```js
 export const name = 'auto-review-router'
-export const inject = ['approval', 'llm', 'permissionPresets', 'tools']   // commands 等一律可选探测
+export const inject = ['approval', 'llm', 'permissionPresets', 'sessions', 'tools'] // 会话枚举是安全关闭的必要依赖；commands 可选
 export function apply(ctx, rawConfig) { ... }
 ```
 
@@ -224,8 +224,8 @@ export function apply(ctx, rawConfig) { ... }
    - **审查失败**（模型错误、非法输出、超时、路由不可解析）→ 一律按 deny 处理（fail-closed），
      reason 为 `Auto review of tool "<name>" failed; its body was not executed: <message>`。
      注意：失败**不**走"转人工审批"分支（与官方一致：失败是拒绝，不是询问）。
-   - 卸载：关闭准入 → 把仍选中 Auto 的会话迁移到 `danger-full-access` → 中止在途审查并等待结清 → 撤回监听器。
-     （迁移路径：`permissionPresets.set(session, 'danger-full-access')`，探测存在才调用。）
+   - 热禁用/正常卸载：关闭准入并中止在途审查 → 使用官方 `setSandboxMode(session, 'read-only')` 收紧仍选中 Auto 的会话（保持审批策略）→ 成功后注销 Auto → 等待审查结清并清理监听器。
+     热禁用若无法枚举会话或持久化收紧权限，保留 Auto 注册与拒绝守卫、显示错误。每代卸载清理须在该代 `registerAuto` effect 之后注册，避免逆序清理先注销 Auto 而丢失识别。强制卸载且会话写入失败时的宿主清理极限须明确报告，不能宣称完整保证。
 4. `logDecisions` 为真时，每次判定用 `ctx.logger.info` 打一行：工具名、路由、风险、决定、耗时。
 
 **性能红线**：审查期间不得遍历目录、不得读写文件；只允许读会话内存状态与发起一次模型请求。
@@ -244,7 +244,7 @@ export function apply(ctx, rawConfig) { ... }
    - deny + `ask` → 返回 `kind: 'ask'`；deny + `never` → 返回 `kind: 'deny'`；
    - allow → 调用 `next()` 且结果透传；
    - `run_code` 外层调用不被审查（直接 `next()`）。
-3. `test/plugin-smoke.mjs`（或并入 selftest）：用假 ctx 桩调用 `apply(ctx, { enabled: false })` 不注册任何订阅；`apply(ctx, { enabled: true })` 时注册 `tools/pre-execute` 并调用 `registerAuto`。
+3. `test/plugin-smoke.mjs`（或并入 selftest）：用假 ctx 桩调用 `apply(ctx, { enabled: false })` 不注册 Auto 或审查守卫（保留配置/状态与 volatile 更新订阅）；`apply(ctx, { enabled: true })` 时注册 `tools/pre-execute` 并调用 `registerAuto`。
 4. README 写明：**与官方 `dsh-experimental-auto-review` 互斥**（两者都注册 `auto`，先加载者胜、后加载者报冲突）、
    `enabled` 默认关闭、失败即拒绝、审查要额外消耗一次模型请求的 token、不得与 `dsh-codex-connect` 的 `enableAutoReview` 同时启用。
 5. 契约第 9 节硬约束全部遵守。
@@ -253,8 +253,7 @@ export function apply(ctx, rawConfig) { ... }
 
 ## 9. 硬约束
 
-- 只用 `node:*` 内建模块，**不得 import 任何 `@deepseek-ai/*`**（工作区外插件解析不到核心包），
-  不得引入第三方依赖。需要的常量用字面量：`'auto'`、`'custom'`、`'run_code'`、`'danger-full-access'`。
+- 业务逻辑使用 `node:*`；官方 Config schema 与 sandbox canonical setter 作为声明的宿主 peer 使用，不捆绑另一套核心。测试依赖与运行 peer 分开；不私自写真实 profile 或建立第二份配置文件。
 - 不修改 `C:\Program Files\DSH NEXT` 下任何文件；不写 `~/.dsh`。
 - 不执行 `git commit` / `git push`。
 - **不得逐字复制官方 `dsh-experimental-auto-review/lib/index.js` 的代码块**：可以读它来理解行为与内部 API 用法，

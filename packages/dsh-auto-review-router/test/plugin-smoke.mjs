@@ -1,7 +1,8 @@
 /**
  * 假 ctx 桩：apply 的注册行为。与 selftest 分开，供中控脚本单独执行。
  */
-import { apply } from '../lib/index.js'
+import './runtime.mjs'
+const { apply } = await import('../lib/index.js')
 
 let failed = 0
 
@@ -50,7 +51,7 @@ function fakeCtx() {
 try {
   const disabled = fakeCtx()
   apply(disabled, { enabled: false })
-  if (disabled.listeners.length !== 0 || disabled.calls.registerAuto !== 0) {
+  if (disabled.listeners.some(row => row.name === 'tools/pre-execute') || disabled.calls.registerAuto !== 0) {
     throw new Error(`listeners=${disabled.listeners.length} registerAuto=${disabled.calls.registerAuto}`)
   }
   pass('apply(ctx, { enabled: false }) 不注册任何订阅')

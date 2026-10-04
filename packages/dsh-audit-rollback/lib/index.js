@@ -28,6 +28,9 @@ import {
   sha1Hex,
 } from './ledger.js'
 
+import { readConfigValues } from './config.js'
+export { Config } from './config.js'
+
 export const name = 'audit-rollback'
 
 /** 只强依赖工具注册表（契约第 5.1 节）。 */
@@ -57,7 +60,7 @@ function asPositiveInt(value, fallback) {
 
 /** 把 profile 传入的原始 config 规范化为内部结构（非法字段忽略，不抛错）。 */
 export function normalizeConfig(raw) {
-  const cfg = raw !== null && typeof raw === 'object' ? raw : {}
+  const cfg = readConfigValues(raw !== null && typeof raw === 'object' ? raw : {})
   const captureTools = asNames(cfg.captureTools)
   return {
     stateDir: resolveStateDir(cfg),
@@ -104,7 +107,7 @@ const runtimeByCtx = new WeakMap()
  */
 export function queryAuditStatus(ctx, rawConfig) {
   const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
-  const config = live?.config ?? normalizeConfig(rawConfig ?? ctx?.config)
+  const config = live?.readConfig() ?? normalizeConfig(rawConfig ?? ctx?.config)
   return collectAuditStatus(config, live)
 }
 
@@ -374,7 +377,13 @@ export function apply(ctx, rawConfig) {
     )
   }
   // 只读诊断：记下本次 apply 的生效配置，供设置页与离线假 ctx 查询。不改变捕获语义。
-  runtimeByCtx.set(ctx, { config, stateReady, initError })
+  // Ordinary stateDir stays tied to this instance. Volatile fields are dereferenced at
+  // each new turn; an in-flight turn never changes policy or object-store location.
+  const readConfig = () => ({ ...normalizeConfig(rawConfig), stateDir: config.stateDir })
+  runtimeByCtx.set(ctx, { readConfig, stateReady, initError })
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settings'], (scope) => scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber)))
+  }
   exposeAuditRemote(ctx)
 
   // 加载 banner（契约第 6.1 条）：stateDir、captureTools、captureMaxBytes、gitSnapshot 状态
@@ -415,6 +424,7 @@ export function apply(ctx, rawConfig) {
   function captureAfterOnce(sessionId, slot) {
     if (slot.state === null || slot.state.afterDone) return
     slot.state.afterDone = true
+    const config = slot.config
     for (const path of slot.state.capturedPaths) {
       try {
         capturePath(config.stateDir, {
@@ -441,11 +451,12 @@ export function apply(ctx, rawConfig) {
       if (event.type === 'turn/start') {
         slot.turn = turn
         slot.state = createTurnState()
-        appendEntry(config.stateDir, { kind: 'turn/start', session: id, turn, cwd: cwdOf(session) ?? '' })
+        slot.config = readConfig()
+        appendEntry(slot.config.stateDir, { kind: 'turn/start', session: id, turn, cwd: cwdOf(session) ?? '' })
       } else if (event.type === 'turn/end') {
         if (slot.state !== null) {
           captureAfterOnce(id, slot)
-          appendEntry(config.stateDir, {
+          appendEntry(slot.config.stateDir, {
             kind: 'turn/end',
             session: id,
             turn: slot.turn,
@@ -483,6 +494,7 @@ export function apply(ctx, rawConfig) {
         const session = exec && exec.agent ? exec.agent.session : undefined
         const id = sessionIdOf(session)
         const slot = session !== undefined ? slotFor(session) : { turn: -1, state: null }
+        const config = slot.state !== null ? slot.config : readConfig()
         const toolName = typeof exec.name === 'string' ? exec.name : ''
         const target = identifyTarget(exec.arguments, cwdOf(session))
         const targets = target === undefined ? [] : [target]

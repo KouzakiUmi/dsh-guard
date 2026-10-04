@@ -8,7 +8,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { apply, queryRouterStatus, routerStatusRemote } from '../lib/index.js'
+import './runtime.mjs'
+const { apply, queryRouterStatus, routerStatusRemote } = await import('../lib/index.js')
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 let failed = 0
@@ -120,7 +121,7 @@ ok('缺少 registerAuto 仍然抛错，不改既有失败语义', () => {
   )
 })
 
-ok('client 描述符与 host 逐字段全等，且两端都没有核心包 import', () => {
+ok('只读 client 描述符与 host 逐字段全等，schema 与官方 sandbox setter 是声明的依赖', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const host = readFileSync(join(testDir, '..', 'lib', 'index.js'), 'utf8')
   const descriptor = routerStatusRemote.descriptors[0]
@@ -153,29 +154,23 @@ ok('client 描述符与 host 逐字段全等，且两端都没有核心包 impor
   assert.ok(client.includes("require('react')"))
   const forbidden = /(?:from\s*['"]@deepseek-ai\/|require\(\s*['"]@deepseek-ai\/|import\(\s*['"]@deepseek-ai\/)/
   assert.equal(forbidden.test(client), false)
-  assert.equal(forbidden.test(host), false)
+  const manifest = JSON.parse(readFileSync(join(testDir, '..', 'package.json'), 'utf8'))
+  for (const match of host.matchAll(/from\s*['"](@deepseek-ai\/[^'"]+)['"]/g)) assert.ok(manifest.peerDependencies[match[1]], `undeclared peer: ${match[1]}`)
 })
 
-ok('client 设置页注册契约：settings.section 主入口 + plugins.tab 探针附加', () => {
+ok('client 设置页注册契约：仅内置插件页签，无独立侧栏入口', () => {
   const client = readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8')
   const grab = (pattern, field) => {
     const match = client.match(pattern)
     assert.ok(match, `client.js 未找到设置页注册字段 ${field}`)
     return match[1]
   }
-  // 实机验证结论：plugins.tab 单独注册会静默不出现（inject 等待语义，try/catch 回退不触发），
-  // 因此 settings.section 必须是主入口且在前，plugins.tab 降级为探针可选附加。
+  // 系统级插件只贡献一个内置插件页签；槽晚声明也不得另建侧栏回退入口。
   const registrations = [...client.matchAll(/registerInto\('([^']+)', entry\.(\w+)\)/g)]
     .map((match) => ({ slot: match[1], idField: match[2] }))
-  assert.deepEqual(registrations, [
-    { slot: 'settings.section', idField: 'id' },
-    { slot: 'settings.plugins.tab', idField: 'tabId' },
-  ])
-  // 两个槽的注册 id 必须不同（同一 id 跨槽注册虽合法，但区分 id 便于日志定位）。
-  // 描述符 id 含 '#' 被 [^'#]+ 排除，首个匹配即 entry.id。
-  const entryId = grab(/\bid:\s*'([^'#]+)'/, 'entry.id')
-  const tabId = grab(/\btabId:\s*'([^']+)'/, 'entry.tabId')
-  assert.notEqual(entryId, tabId)
+  assert.deepEqual(registrations, [{ slot: 'settings.plugins.tab', idField: 'tabId' }])
+  assert.equal(client.includes("'settings.section'"), false)
+  assert.equal(grab(/\btabId:\s*'([^']+)'/, 'entry.tabId'), 'auto-review-router-tab')
   // 注册字段对齐官方范本：label 走 t('nav')，且 locale 命名空间随注册提交（entry 与 register 各一处代码行）。
   assert.equal(grab(/\blabel:\s*\(\) => t\('([^']+)'\)/, 'label key'), 'nav')
   assert.equal([...client.matchAll(/^\s*locale:\s*NS,$/gm)].length, 2)

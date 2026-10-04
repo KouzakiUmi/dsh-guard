@@ -15,7 +15,7 @@
 #   logCalls        true       是否记录每次工具调用的 call 条目
 #   excludeGlobs    [glob…]    命中即不捕获：含通配符按 glob（* / ** / ?）匹配，
 #                              不含通配符按路径片段匹配（如 /node_modules/ 命中其下任意文件）
-#   gitSnapshot     false      影子 git 快照开关（本阶段未实现，打开只记 note + warn）
+#   gitSnapshot     false      未实现且设置页不可编辑；仅兼容旧 profile true 的告警
 - insert:
     - id: audit-rollback
       name: dsh-audit-rollback

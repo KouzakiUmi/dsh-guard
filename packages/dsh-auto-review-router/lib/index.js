@@ -1,10 +1,13 @@
 /**
  * 可指定模型的 Auto 审查门。
  * reviewer 路由来自插件配置；配置不全时按 fallbackToSessionRoute 回退会话路由，否则拒绝。
- * 不 import 任何核心包。内部会话 API 一律探测，探测失败只降级或拒执行。
+ * 使用已声明 peer 的官方 Config schema 与 sandbox-mode setter；设置持久化归官方 Settings。
  */
 
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
+export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
   buildReviewContext,
@@ -15,53 +18,18 @@ import {
 /** Cordis 插件名，与 patch 行 id 一致。 */
 export const name = 'auto-review-router'
 
-/** 缺一不可的宿主服务。sessions / commands 只做运行时探测。 */
-export const inject = ['approval', 'llm', 'permissionPresets', 'tools']
+/** sessions 必需：禁止在无法枚举现有 Auto 会话时假定关闭安全。 */
+export const inject = ['approval', 'llm', 'permissionPresets', 'tools', 'sessions']
 
 const AUTO_PRESET = 'auto'
 const RUN_CODE_NAME = 'run_code'
-const FULL_ACCESS_PRESET = 'danger-full-access'
+
 const DENIED_ERROR_NAME = 'AutoReviewDeniedError'
 const DENIED_ERROR_CODE = 'AUTO_REVIEW_DENIED'
 const CONFLICT_WARN = '官方 dsh-experimental-auto-review 已注册 Auto，本插件无法同时启用；请先禁用其一'
 
-export const DEFAULT_CONFIG = Object.freeze({
-  enabled: false,
-  reviewerProvider: '',
-  reviewerModel: '',
-  reviewerEffort: '',
-  fallbackToSessionRoute: true,
-  maxContextBytes: 32768,
-  historyLimit: 20,
-  includeProjectInstructions: true,
-  temperature: 0,
-  timeoutMs: 20000,
-  logDecisions: true,
-})
-
 /**
- * 把 loader 传入的原始配置收成内部结构。未导出 Config schema（不能依赖 cordis）。
- * @param {object | null | undefined} raw
- */
-export function normalizeConfig(raw) {
-  const cfg = raw !== null && typeof raw === 'object' ? raw : {}
-  return {
-    enabled: cfg.enabled === true,
-    reviewerProvider: asString(cfg.reviewerProvider, DEFAULT_CONFIG.reviewerProvider),
-    reviewerModel: asString(cfg.reviewerModel, DEFAULT_CONFIG.reviewerModel),
-    reviewerEffort: asString(cfg.reviewerEffort, DEFAULT_CONFIG.reviewerEffort),
-    fallbackToSessionRoute: cfg.fallbackToSessionRoute !== false,
-    maxContextBytes: positiveInt(cfg.maxContextBytes, DEFAULT_CONFIG.maxContextBytes),
-    historyLimit: nonNegativeInt(cfg.historyLimit, DEFAULT_CONFIG.historyLimit),
-    includeProjectInstructions: cfg.includeProjectInstructions !== false,
-    temperature: typeof cfg.temperature === 'number' && Number.isFinite(cfg.temperature) ? cfg.temperature : DEFAULT_CONFIG.temperature,
-    timeoutMs: positiveInt(cfg.timeoutMs, DEFAULT_CONFIG.timeoutMs),
-    logDecisions: cfg.logDecisions !== false,
-  }
-}
-
-/**
- * 插件入口。enabled 为假时不注册任何订阅。
+ * 插件入口。enabled 为假时不发布 Auto；保留 Loader 配置通知以支持热启用。
  * @param {object} ctx
  * @param {object} [rawConfig]
  */
@@ -74,7 +42,7 @@ export function normalizeConfig(raw) {
  */
 export function queryRouterStatus(ctx, rawConfig) {
   const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
-  const config = live?.config ?? normalizeConfig(rawConfig ?? ctx?.config)
+  const config = live?.readConfig() ?? normalizeConfig(rawConfig ?? ctx?.config)
   return {
     plugin: 'dsh-auto-review-router',
     enabled: config.enabled,
@@ -84,6 +52,7 @@ export function queryRouterStatus(ctx, rawConfig) {
       registered: live?.registered === true,
       conflict: live?.conflict === true,
       conflictWarning: live?.conflict === true ? CONFLICT_WARN : null,
+      error: live?.error ?? null,
     },
     route: describeRoute(config),
     budget: {
@@ -234,76 +203,89 @@ function exposeRouterRemote(ctx) {
 }
 
 export function apply(ctx, rawConfig) {
-  const config = normalizeConfig(rawConfig)
-  const snap = {
-    config,
-    attempted: false,
-    registered: false,
-    conflict: false,
-  }
+  const readConfig = () => normalizeConfig(rawConfig)
+  const snap = { readConfig, attempted: false, registered: false, conflict: false, error: null }
   runtimeByCtx.set(ctx, snap)
   exposeRouterRemote(ctx)
-  if (!config.enabled) {
-    ctx.logger?.info?.('dsh-auto-review-router: 未启用（enabled: false），不注册 Auto 集成。')
-    return
-  }
-  if (typeof ctx.on !== 'function' || typeof ctx.permissionPresets?.registerAuto !== 'function') {
-    throw new Error('auto-review-router: 缺少 tools 事件总线或 permissionPresets.registerAuto')
-  }
+  ctx.inject?.(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
+  let generation
+  let closed = false
+  let guard
 
-  const state = {
-    accepting: true,
-    active: new Set(),
-    lifecycle: new AbortController(),
-    warnedCwd: false,
-    warnedHistory: false,
+  const stop = () => {
+    if (!generation) return
+    const previous = generation
+    previous.accepting = false
+    previous.lifecycle.abort(new Error('auto-review-router 集成已关闭'))
+    // Narrow file access only: never call presets.set(), which also changes approval.
+    try { migrateAutoSessions(ctx) }
+    catch (error) {
+      snap.error = `安全关闭失败，Auto 注册与拒绝守卫仍保留：${errorMessage(error)}`
+      throw new Error(snap.error, { cause: error })
+    }
+    callDisposer(previous.removeAuto)
+    generation = undefined
+    callDisposer(guard)
+    guard = undefined
+    snap.registered = false
+    snap.error = null
   }
-  const handler = (exec, next) => reviewGate(ctx, config, state, exec, next)
-  const removeListener = ctx.on('tools/pre-execute', handler, { prepend: true })
-
-  snap.attempted = true
-  let removeAuto
-  try {
-    removeAuto = ctx.permissionPresets.registerAuto(() => {
-      if (!state.accepting) throw new Error('auto-review-router: 集成正在关闭，拒绝选中 Auto')
-    })
-    snap.registered = true
-  } catch (error) {
-    callDisposer(removeListener)
-    if (isAutoConflict(error)) {
+  const reconcile = () => {
+    const config = readConfig()
+    if (closed || !config.enabled) { stop(); return }
+    if (generation?.accepting) return
+    if (generation) stop() // Retry a failed narrowing before any new admission.
+    if (typeof ctx.on !== 'function' || typeof ctx.permissionPresets?.registerAuto !== 'function') {
+      throw new Error('auto-review-router: 缺少 tools 事件总线或 permissionPresets.registerAuto')
+    }
+    // 关闭失败保留拒绝守卫；成功收紧后撤回，避免误拦后续合法 Auto 所有者。
+    guard ??= ctx.on('tools/pre-execute', (exec, next) => {
+      const state = generation
+      if (!state) {
+        if (exec?.agent && ctx.permissionPresets.current(exec.agent.session) === AUTO_PRESET) return { kind: 'cancel' }
+        return next()
+      }
+      return reviewGate(ctx, readConfig(), state, exec, next)
+    }, { prepend: true })
+    const state = { accepting: true, active: new Set(), lifecycle: new AbortController(), warnedCwd: false, warnedHistory: false }
+    snap.attempted = true
+    snap.conflict = false
+    snap.error = null
+    try {
+      state.removeAuto = ctx.permissionPresets.registerAuto(() => {
+        if (closed || !state.accepting || !readConfig().enabled) throw new Error('auto-review-router: 集成正在关闭，拒绝选中 Auto')
+      })
+      generation = state
+      snap.registered = true
+      // Cordis disposes effects in reverse order. Each generation's shutdown
+      // MUST be registered after registerAuto(), before Auto identity disappears.
+      ctx.effect?.(() => shutdown, 'auto-review-router 安全卸载')
+    } catch (error) {
+      callDisposer(guard)
+      guard = undefined
+      if (!isAutoConflict(error)) { snap.error = errorMessage(error); throw error }
       snap.conflict = true
       ctx.logger?.warn?.(CONFLICT_WARN)
-      return
     }
-    throw error
   }
-
+  // Loader commits the root reference before this synchronous notification.
+  ctx.on?.('loader/volatile-update', () => {
+    try { reconcile() } catch (error) { snap.error = errorMessage(error); ctx.logger?.warn?.(snap.error) }
+  })
   const shutdown = async () => {
-    if (!state.accepting) return
-    state.accepting = false
-    try {
-      migrateAutoSessions(ctx)
-    } finally {
-      state.lifecycle.abort(new Error('auto-review-router 集成已卸载'))
-      await Promise.allSettled([...state.active])
-      callDisposer(removeAuto)
-      callDisposer(removeListener)
-    }
+    if (closed) return
+    closed = true
+    const pending = generation ? [...generation.active] : []
+    stop()
+    await Promise.allSettled(pending)
+    callDisposer(guard)
   }
-
-  const effect = typeof ctx.effect === 'function' ? ctx.effect : ctx.fiber?.effect
-  if (typeof effect === 'function') {
-    try {
-      effect.call(ctx.fiber ?? ctx, () => shutdown, 'auto-review-router 卸载')
-    } catch (error) {
-      ctx.logger?.warn?.(`auto-review-router: 无法挂载卸载回调：${errorMessage(error)}`)
-    }
-  }
+  reconcile()
 }
-
 async function reviewGate(ctx, config, state, exec, next) {
   if (exec?.agent == null) return next()
-  if (exec.parent === undefined && exec.name === RUN_CODE_NAME) return next()
   let preset
   try {
     preset = ctx.permissionPresets.current(exec.agent.session)
@@ -311,9 +293,11 @@ async function reviewGate(ctx, config, state, exec, next) {
     return failed(exec.name, error)
   }
   if (preset !== AUTO_PRESET) return next()
-  if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) {
+  if (!config.enabled || !state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) {
     return { kind: 'cancel' }
   }
+  // 外层 PTC 仅在健康启用时豁免审查；关闭失败或中止状态不能绕过拒绝守卫。
+  if (exec.parent === undefined && exec.name === RUN_CODE_NAME) return next()
 
   const ticket = Promise.withResolvers()
   state.active.add(ticket.promise)
@@ -322,17 +306,21 @@ async function reviewGate(ctx, config, state, exec, next) {
   try {
     const signal = combineSignals(exec.signal, state.lifecycle.signal, config.timeoutMs)
     const outcome = await bounded(classify(ctx, config, state, exec, signal), signal)
-    if (state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
     routeLabel = outcome.routeLabel
     logDecision(ctx, config, exec.name, routeLabel, outcome.decision.risk, outcome.decision.decision, started)
-    if (outcome.decision.decision === 'allow') return next()
+    if (outcome.decision.decision === 'allow') {
+      const downstream = await next()
+      if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+      return downstream
+    }
     if (approvalPolicy(ctx, exec.agent.session) === 'never') return denied(exec.name, outcome.decision.reason)
     const downstream = await next()
     if (state.lifecycle.signal.aborted) return { kind: 'cancel' }
     if (downstream?.kind !== 'allow') return downstream
     return askUser(exec.name, outcome.decision.reason)
   } catch (error) {
-    if (state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
     logDecision(ctx, config, exec.name, routeLabel, 'failed', 'deny', started)
     return failed(exec.name, error)
   } finally {
@@ -524,28 +512,17 @@ function warnOnce(ctx, state, key, message) {
 }
 
 function migrateAutoSessions(ctx) {
-  const presets = ctx.permissionPresets
-  if (typeof presets?.set !== 'function' || typeof presets?.current !== 'function') return
   for (const session of listSessions(ctx)) {
-    try {
-      if (presets.current(session) !== AUTO_PRESET) continue
-      presets.set(session, FULL_ACCESS_PRESET)
-    } catch (error) {
-      ctx.logger?.warn?.(`auto-review-router: 迁移 Auto 会话失败：${errorMessage(error)}`)
-    }
+    if (ctx.permissionPresets.current(session) !== AUTO_PRESET) continue
+    // Official canonical setter preserves approval policy and records the narrowing.
+    setSandboxMode(session, 'read-only')
   }
 }
-
 function listSessions(ctx) {
-  const sessions = ctx.sessions
-  if (typeof sessions?.list !== 'function') return []
-  try {
-    const listed = sessions.list()
-    if (listed == null) return []
-    return Array.isArray(listed) ? listed : [...listed]
-  } catch {
-    return []
-  }
+  if (typeof ctx.sessions?.list !== 'function') throw new Error('sessions.list 不可用，无法安全关闭 Auto')
+  const listed = ctx.sessions.list()
+  if (listed == null) throw new Error('sessions.list 未返回会话集合，无法安全关闭 Auto')
+  return Array.isArray(listed) ? listed : [...listed]
 }
 
 function combineSignals(execSignal, lifecycleSignal, timeoutMs) {

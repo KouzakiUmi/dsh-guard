@@ -1,6 +1,8 @@
 # 设计契约 · dsh-guard 的 CI 与发包流程
 
-> 本文件是 CI/发布实现的**唯一真源**。参考实现是 `D:\dsh-subusage`（单包仓库），
+> 2026-10-05 修订：可编辑设置新增 `lib/config.js` 发布文件；Node 24 CI 安装锁定的官方测试 devDependencies（`npm install --ignore-scripts`），根 verify 运行全部 `test/*.mjs` 测试、排除 bootstrap/runtime 辅助模块。官方 API 导入须为 peer，不再以“零 import”为门禁。下文原有清单和 Node 22 说明仅为历史设计，发布脚本当前实现及可编辑设置测试是新的验收依据。
+>
+> 本文件记录 CI/发布设计。参考实现是 `D:\dsh-subusage`（单包仓库），
 > 但本仓库是 **monorepo、一次发布两个包**，所以凡标"裁定"的地方不得照抄，必须按本文件执行。
 > 凡是本文件写定的字段名、job 名、顺序、权限与保护逻辑，实现必须逐字遵守。
 

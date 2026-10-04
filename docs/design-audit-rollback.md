@@ -237,7 +237,7 @@ audit-rollback last     [--state <dir>] [--apply] [--force] [--json]
    - 账本 append-only：回滚前后已有行字节不变（只追加）。
 3. **插件可加载性**：`test/` 里另加一个 `plugin-smoke.mjs`（或并入 selftest），用最小假 ctx 桩（`{ logger:{info,warn}, on:()=>()=>{}, get:()=>undefined, effect:(fn)=>{...} }`）调用 `apply(ctx, {})`，断言不抛错且注册了 4 个事件名（`session/event`、`session/disposed`、`agent/turn-stopping`、`tools/pre-execute`）。
 4. **端到端**：在临时目录跑通 `list` → `undo`(dry-run) → `undo --apply` → 用 `show` 复核状态，并把完整命令与输出贴进交付报告。
-5. 说明书：`README.zh.md` 写清能力、**明确写出限制**（只覆盖文件工具点名的路径、shell 改动不入账、objects 永不自动清理、无 GUI），并给出安装前的人工步骤（不改 `~/.dsh`，不自动安装）。
+5. 说明书：`README.zh.md` 写清能力、**明确写出限制**（只覆盖文件工具点名的路径、shell 改动不入账、objects 永不自动清理；现已提供配置/状态 GUI，回滚仍为离线 CLI），并给出安装前的人工步骤（不改 `~/.dsh`，不自动安装）。
 
 ---
 
@@ -245,7 +245,7 @@ audit-rollback last     [--state <dir>] [--apply] [--force] [--json]
 
 - 不修改 `C:\Program Files\DSH NEXT` 下任何文件。
 - 不写 `~/.dsh`（测试一律用 `test/` 下的临时目录，或系统临时目录，并在结束时清理）。
-- 不 import `@deepseek-ai/*`；不引入任何第三方依赖。
+- 存储/回滚层仅使用 `node:*`；可编辑设置的 Config schema 使用声明的官方宿主 peer，不捆绑核心副本。配置写入由官方 Settings/ConfigEditor 管理，不另建配置文件。
 - 不 `git commit`、不 `git push`（由中控决定提交）。
 - 代码注释用中文，风格对照 `dsh-preset-tool-guard`。
 - 任何"猜"出来的 API 用法，必须在 README 的"未核实项"一节列出。

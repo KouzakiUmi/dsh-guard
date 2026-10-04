@@ -19,24 +19,18 @@
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带只读状态设置页 | 0.1.0 |
-| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带只读状态设置页 | 0.1.0 |
+| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.1 |
+| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.1 |
 
-两者都是**零运行时依赖**（只用 `node:*` 内建模块），且都**不 import `@deepseek-ai/*`**——核心包只通过 Cordis 服务注入使用。
+业务存储逻辑只使用 `node:*`；配置声明使用宿主提供的官方 schema peer，设置写入走宿主 `settings` / `configEditor`，不捆绑另一套 DSH 核心，不另建配置文件。
 
 ## 安装
 
 ### 桌面（desktop）profile
 
-桌面 profile 的插件命令会被 `rejectElectronProfile()` 拒绝，因此走 GUI 或 native patch：
+桌面 profile 由 Electron 管理，CLI 会拒绝操作。请通过 GUI 插件管理器安装或更新两个发布 tarball；不要手工编辑 profile 的依赖清单，也不要在 profile 目录执行 `pnpm install`。安装后检查插件加载结果、设置入口及保存后的实际值；仅在管理器要求时重载或重启。
 
-1. `git clone https://github.com/KouzakiUmi/dsh-guard.git ~/.dsh/repos/dsh-guard`
-2. 在 `~/.dsh/profiles/node_modules/` 下为每个包建 junction，指向 clone 内的包目录
-3. 在 `~/.dsh/profiles/<profile>/package.json` 的 `dsh.profile.bundles` 追加包名 —— 这一步控制**是否加载**
-4. 同一 `package.json` 的 `dependencies` 追加 `link:` 条目 —— 这一步控制**GUI 的已安装列表是否显示**（`dshmarket` 的 `readInstalled()` 只读 `dependencies`）
-5. 重启 DSH
-
-> 两个字段的分工最容易踩坑：**`bundles` 决定加载，`dependencies` 决定显示**。只写前者时功能已经生效（日志与数据都在），但 GUI 插件列表里看不到它。
+> 历史手工 junction 安装不再作为推荐流程。工作区源码与已安装副本可能不同；修改源码不代表当前 GUI 已加载新版本。
 
 ### 非桌面 profile
 
@@ -53,23 +47,16 @@ dsh plugin --profile <name> add <包绝对路径或 tarball URL>
 
 ## 设置
 
-两个包各带一个**只读状态页**（设置 → 插件）：
+两个包各带**可编辑配置与实时状态页**，系统级设置统一位于 **设置 → 内置插件**，只保留一个入口，不再在设置侧栏另开页面：
 
-- **dsh-audit-rollback**：stateDir、账本条目统计（按 kind）、objects 数量与字节数、最近捕获明细、当前生效配置。
-- **dsh-auto-review-router**：`enabled` 状态、解析出的 reviewer 路由（配置路由或会话回退）、与官方 auto-review 的注册冲突提示、上下文与超时预算。
+- **审计与回滚**：编辑捕获工具、捕获字节上限、参数预览上限、调用记账与排除路径；保留账本、对象库和最近捕获诊断。状态目录不是即时字段；未实现的影子 Git 快照不作为有效开关提供。
+- **Auto 审查路由**：编辑启用状态、reviewer provider/model/effort、会话回退、上下文/历史/超时预算及日志策略；显示实际注册结果、路由和冲突。
 
-第一版刻意**不做配置写入**：这两处配置是 cordis Config（loader 层，运行时不可变）。要改配置，写进 profile 的 `cordis.patch.yml`：
+保存通过官方 `settings` 服务，按 Config schema 校验，以 revision 拒绝过期写入，持久化至当前 profile 的 Cordis patch。不直接修改依赖清单，也不使用额外的插件设置文件。更高层 overlay 覆盖或 Settings 不可用时显示明确错误，不伪报保存成功。
 
-```yaml
-- id: auto-review-router
-  config:
-    enabled: true
-    reviewerProvider: xai-oauth
-    reviewerModel: grok-4.7
-    reviewerEffort: high
-```
+即时字段使用 `.volatile()` 配置引用；审计轮次和单次模型审查各持有配置快照，避免编辑途中混用新旧配置。启用插件不等于自动替用户选中 Auto，也不改变用户的审批策略。
 
-> 注意 Loader 对同一 `id` 的 config 是**整体替换**：写了 `config:` 就要把要用的字段写全，漏写的会回落到代码默认值。
+> 旧版“Config 一律不可变、只能手写 YAML”的说明已撤回。普通字段仍需配置编辑器重载；即时字段可以直接在设置页编辑。源码改动不代表已安装副本已经生效。
 
 ## 文档
 
@@ -81,9 +68,10 @@ dsh plugin --profile <name> add <包绝对路径或 tarball URL>
 ## 开发
 
 ```sh
-node tools/verify.mjs            # 机械验收：语法、自测、硬约束、清单一致性
+npm install --ignore-scripts     # 仅仓库开发依赖，不在 DSH profile 目录执行
+node tools/verify.mjs            # 机械验收：语法、全部测试、API peer、清单一致性
 node scripts/check-manifest.mjs  # 逐包清单校验（含 exports["./client"] 门禁）
-node scripts/pack-all.mjs        # 本地一键打包到 dist/
+node scripts/pack-all.mjs        # 打包到 dist/ 并核对实际 tarball 字节及 JS 语法
 npm run release:local            # verify + check-manifest + pack-all
 ```
 

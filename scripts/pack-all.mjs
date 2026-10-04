@@ -27,3 +27,7 @@ execFileSync(process.execPath, [join(root, "scripts", "prepare-release.mjs")], {
 	cwd: root,
 	stdio: "inherit",
 });
+execFileSync(process.execPath, [join(root, "tools", "check-packed.mjs")], {
+	cwd: root,
+	stdio: "inherit",
+});
