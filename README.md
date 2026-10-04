@@ -19,8 +19,8 @@
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.1 |
-| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.1 |
+| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.2 |
+| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.2 |
 
 业务存储逻辑只使用 `node:*`；配置声明使用宿主提供的官方 schema peer，设置写入走宿主 `settings` / `configEditor`，不捆绑另一套 DSH 核心，不另建配置文件。
 
@@ -28,7 +28,7 @@
 
 ### 桌面（desktop）profile
 
-桌面 profile 由 Electron 管理，CLI 会拒绝操作。请通过 GUI 插件管理器安装或更新两个发布 tarball；不要手工编辑 profile 的依赖清单，也不要在 profile 目录执行 `pnpm install`。安装后检查插件加载结果、设置入口及保存后的实际值；仅在管理器要求时重载或重启。
+桌面 profile 使用官方桌面入口。普通核心 CLI 默认拒绝 `desktop`，但本机 NEXT 的已安装 `lib/desktop-cli.js` 官方自带桌面管理能力，0.2.1 已通过该入口安装；其他版本须先核对现场入口。使用 GUI 管理器或此官方桌面 CLI 更新固定 CI/release tarball，不自行注入管理开关、不手改 profile 依赖、不直接执行 profile 目录里的 `pnpm install`。安装后核验来源、bundles、版本与包完整性；运行态/GUI 单独验收，重启另需授权。
 
 > 历史手工 junction 安装不再作为推荐流程。工作区源码与已安装副本可能不同；修改源码不代表当前 GUI 已加载新版本。
 
@@ -50,7 +50,7 @@ dsh plugin --profile <name> add <包绝对路径或 tarball URL>
 两个包各带**可编辑配置与实时状态页**，系统级设置统一位于 **设置 → 内置插件**，只保留一个入口，不再在设置侧栏另开页面：
 
 - **审计与回滚**：编辑捕获工具、捕获字节上限、参数预览上限、调用记账与排除路径；保留账本、对象库和最近捕获诊断。状态目录不是即时字段；未实现的影子 Git 快照不作为有效开关提供。
-- **Auto 审查路由**：编辑启用状态、reviewer provider/model/effort、会话回退、上下文/历史/超时预算及日志策略；显示实际注册结果、路由和冲突。
+- **Auto 审查路由**：从 DSH 已配置模型目录选择审查模型，思考深度随模型支持项联动，不手填 provider/model；保留启用、会话回退、上下文/历史/超时预算、日志与注册冲突状态。
 
 保存通过官方 `settings` 服务，按 Config schema 校验，以 revision 拒绝过期写入，持久化至当前 profile 的 Cordis patch。不直接修改依赖清单，也不使用额外的插件设置文件。更高层 overlay 覆盖或 Settings 不可用时显示明确错误，不伪报保存成功。
 

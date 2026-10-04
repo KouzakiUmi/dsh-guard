@@ -1,4 +1,4 @@
-# dsh-auto-review-router 0.2.1
+# dsh-auto-review-router 0.2.2
 
 可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。
 
@@ -6,7 +6,10 @@
 
 设置页统一位于 **设置 → 内置插件 → Auto 审查路由**，只注册 `settings.plugins.tab`，不再在设置侧栏贡献独立页面。需启用官方内置插件设置容器；容器晚声明时等待，不注册另一处回退入口。客户端使用官方 `remote.settings.describe()` 获取 `auto-review-router` 条目的表单、实际值和 revision，用 `update(ns, patch, revision)` 保存。
 
-- 支持启用、审查路由/effort、回退、预算、超时、温度、项目指令与日志开关。
+- 审查模型从 DSH 官方已配置目录选择，不手填 provider/model。使用与官方模型菜单相同的无 sessionId `remote.session.modelCatalog()`，仅读取目录元信息，不探测端点或发起模型审查。
+- provider/model 联动选择，effort 仅提供该模型支持项与「适配器默认」；切换模型清除不兼容 effort。保留「会话回退」与明确清空专用路由的选项。
+- 目录加载、失败、空列表和刷新都有反馈。旧保存的路由失效时明确显示并保留草稿，不悄悄替换；目录异常不应锁死安全关闭。
+- 其他启用、回退、预算、超时、温度、项目指令与日志开关保持。
 - **保存**经官方 Config 校验、ConfigEditor 原子持久化及 Loader reconciliation；**取消**仅丢弃草稿，不写入配置。
 - 过期 revision 明确报冲突，保留草稿，不盲目重试；**重新读取**明确丢弃草稿并读取最新值。
 - 不可写、缺少唯一活动条目、写入失败或依赖缺失会显示错误。配置条目 id 必须为 bundle 默认的 `auto-review-router`；重命名或非 profile 所属嵌套 Include 不支持本页编辑。
@@ -21,9 +24,9 @@
 | 字段 | 默认 | 校验 / 含义 |
 | --- | --- | --- |
 | `enabled` | `false` | 启用后发布 Auto 选项，不自动为当前会话选择 Auto |
-| `reviewerProvider` | `''` | 与 model 同时填写或同时留空，首尾空白去除 |
-| `reviewerModel` | `''` | 本机已配置的模型路由；不发请求测试可达性 |
-| `reviewerEffort` | `''` | 非空时要求完整配置路由；值由所选 provider 在请求时校验 |
+| `reviewerProvider` | `''` | 由目录选择维护；底层字段与 model 必须同时完整或空 |
+| `reviewerModel` | `''` | 从本机已配置模型目录选择；不发请求测试可达性 |
+| `reviewerEffort` | `''` | 从所选模型支持项选择；空为适配器默认，非空须完整路由 |
 | `fallbackToSessionRoute` | `true` | 没有配置路由时使用会话 provider/model；不带 reviewerEffort |
 | `maxContextBytes` | `32768` | 整数 1–1048576；固定保护分区装不下时拒绝 |
 | `historyLimit` | `20` | 整数 0–1000 |
@@ -32,7 +35,7 @@
 | `timeoutMs` | `20000` | 整数 1–300000，超时 fail-closed |
 | `logDecisions` | `true` | 记录工具名、路由、风险、决定、耗时，不记录请求正文 |
 
-启用并关闭回退时必须填写完整 reviewer 路由。provider/model 留空且允许回退时，每次从 `session.requestHeader().config` 读取会话路由；不可用则拒绝。部分填写不再静默回退，而是在保存前拒绝。
+启用并关闭回退时必须选择完整 reviewer 路由。provider/model 留空且允许回退时，每次从 `session.requestHeader().config` 读取会话路由；不可用则拒绝。部分填写不再静默回退，而是在保存前拒绝。
 
 ## 启停安全与冲突
 
@@ -69,6 +72,7 @@ node packages/dsh-auto-review-router/test/selftest.mjs
 node packages/dsh-auto-review-router/test/plugin-smoke.mjs
 node packages/dsh-auto-review-router/test/status.mjs
 node packages/dsh-auto-review-router/test/settings.mjs
+node packages/dsh-auto-review-router/test/configured-model-picker.mjs
 node packages/dsh-auto-review-router/test/lifecycle.mjs
 node packages/dsh-auto-review-router/test/loader-settings.mjs
 ```
@@ -87,11 +91,13 @@ node packages/dsh-auto-review-router/test/loader-settings.mjs
 - `dsh-api-settings-controller/lib/index.js`：`describe/update` RemoteResult、`settings/conflict` / `settings/rejected`。
 - `dsh-permission-presets/lib/index.js`：Auto 注册与 current/derive；`set` 同时改 sandbox 与 approval；无集成时拒绝恢复 Auto。
 - `dsh-sandbox-policy/lib/index.js`：canonical `setSandboxMode` 只追加 `sandbox/mode` 事件，不改 approval。
+- `dsh-api-session-controller/lib/types/catalog.js:5–59`：无 Session 的 `buildModelCatalog` 聚合活动 provider、模型和 reasoning，并隔离各 provider 失败；RPC 返回 `groups[].models[].reasoning.efforts[]`（id/name）与可选 defaultEffort。
+- `dsh-client-ui-model-selection/lib/client.js:752–762`：官方模型菜单同样调用 `remote.session.modelCatalog()`，本插件不使用会话专用 `selectModel` 来修改用户会话。
 
 ## 未核实项
 
 - 实际 provider/model/effort 可达性与付费模型审查未执行；跨核心版本只声明 peer 范围，不代表行为验收。
 - 强制销毁 fiber 且日志写入失败时的保证极限见「启停安全与冲突」，不宣称已完整解决。
-- GitHub CI 未在本轮触发；VM 交互与临时 profile 测试不等于真实浏览器部署验收。
+- VM 交互与临时 profile 测试不等于真实浏览器部署验收；CI 和安装状态以具体发布/安装记录为准。
 
-当前仅修改开发 checkout，**没有更新已安装副本，没有验证页面在线可见**。后续须用户明确授权并通过官方插件管理流程更新到 0.2.1，再按 host/client 重载机制验证；不能从本地测试通过推断运行中旧 0.1.0 已生效。
+0.2.2 提供模型目录选择。源码、离线测试、CI 发包、磁盘安装和 GUI 在线生效是不同阶段；更新须经官方管理入口，再按实际 host/client 重载机制验收。不得从测试通过或已更新包版本推断当前页面已经生效；重启另须用户授权。

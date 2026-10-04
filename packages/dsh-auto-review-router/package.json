@@ -1,6 +1,6 @@
 {
   "name": "dsh-auto-review-router",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "可指定模型的 Auto 审查：reviewer 路由来自插件配置，缺省回退当前会话。",
   "type": "module",
@@ -58,7 +58,8 @@
         "@deepseek-ai/dsh-client-ui-settings-plugins",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-api-settings-controller"
+        "@deepseek-ai/dsh-api-settings-controller",
+        "@deepseek-ai/dsh-api-session-controller"
       ]
     }
   }

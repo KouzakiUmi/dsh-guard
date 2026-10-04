@@ -32,7 +32,7 @@ patch 只能改 loader 配置，改不了代码逻辑。
 ### 非目标
 
 - 不修改安装树、不打补丁、不做 ASAR 操作。
-- 不做 GUI（权限选择器沿用官方 `dsh-client-ui-permission-presets`；本包只注册 Auto 集成）。
+- 不替换官方权限选择器、不自动选择 Auto 或改审批策略。本包在「设置→内置插件」提供审查配置；0.2.2 的路由从 DSH 官方已配置模型目录选择，不再提供 provider/model 文本输入。
 - 不实现"记住授权 / allow-always"（官方审批 seam 不支持；不要臆造）。
 
 ---

@@ -7,7 +7,7 @@
 - **编辑前捕获**：`write` / `edit` / `str_replace_editor`（可配）调用前捕获目标文件原始字节进 CAS（SHA-1 寻址，同内容只存一份）。
 - **逐轮审计账本**：`turn/start`、`call`（工具名 + 参数哈希 + 截断预览）、`capture/before|after`、`turn/end`、`rollback`、`note` 六类条目，按 UTC 日期分文件，append-only。
 - **精确回滚**：独立 CLI 按会话 + 轮次回滚——已存在的文件从 CAS 恢复、新建的文件收进回收站；轮后被改动过的文件默认 skip，`--force` 才覆盖；dry-run 为默认，`--apply` 才真正动手。
-- **可编辑设置页**：零构建手写 client，主入口 `settings.section`；支持编辑、保存、取消并重新读取、字段校验、保存结果与 revision 冲突提示。配置持久化只使用官方 Settings/ConfigEditor；存储层和 CLI 仍只用 Node 内建模块。
+- **可编辑设置页**：零构建手写 client，唯一入口 `settings.plugins.tab`（设置→内置插件）；支持编辑、保存、取消并重新读取、字段校验、保存结果与 revision 冲突提示。配置持久化只使用官方 Settings/ConfigEditor；存储层和 CLI 仍只用 Node 内建模块。
 - **官方 Config schema**：Host 依赖 peer `@deepseek-ai/schemastery ~3.18.5-alpha.1`，五个可编辑字段声明 `.volatile()`，运行时读取 `.get()`。
 
 ## 限制（明确不做）
@@ -24,9 +24,9 @@
 
 ## 安装与生效边界
 
-本次只在开发仓库实现与离线测试，**未安装、未修改真实 profile/核心/安装树、未重启**。需要部署时另行获得授权，通过目标 profile 的官方插件管理入口操作；desktop 使用 GUI 插件管理器，其他 profile 先核验目标 CLI 的 `plugin --help`。不要手工链接包进 profile、不对真实 profile 运行包管理器、不修改 profile manifest 来绕过官方检查。
+离线测试不代表真实 GUI 生效。部署须经授权，通过目标 profile 的官方插件管理入口；desktop 使用 GUI 或当前安装树已核实支持的官方 `desktop-cli.js`，不能用普通核心 CLI 自行绕过桌面限制。不要手工链接包进 profile、不在真实 profile 直接运行包管理器、不手改其依赖 manifest。重启另需授权。
 
-工作区代码更新不等于已安装副本更新。部署后需核验 Host Config schema、官方 settings namespace、client ModuleLoader 与 `settings.section` 入口；首次引入 schema/client 需要消费实例加载新版本。后续 volatile 表单保存不用重启，且仅对新轮次生效；普通 stateDir 迁移不能用此表单热改。
+工作区代码更新不等于已安装副本更新。部署后需核验 Host Config schema、官方 settings namespace、client ModuleLoader 与 `settings.plugins.tab` 唯一入口；首次引入 schema/client 需要消费实例加载新版本。后续 volatile 表单保存不用重启，且仅对新轮次生效；普通 stateDir 迁移不能用此表单热改。
 
 `cordis.patch.yml` 默认配置保守：不显式设 `stateDir`（回落 `$DSH_HOME/audit-rollback` → `~/.dsh/audit-rollback`）、`gitSnapshot:false`、默认排除 `node_modules` / `.git` / `.dsh-memory` / `.graphflow-cache` 四类目录。
 

@@ -17,6 +17,10 @@ window.__ModuleLoader__.load({
       configuration: '配置', save: '保存', saving: '保存中…', cancel: '取消', saved: '已保存（即时生效）',
       reloadConfig: '重新读取（丢弃草稿）', stale: '配置已过期，请重新读取后再应用修改。',
       safety: '通过官方 Settings 保存。启用仅发布 Auto 选项，不自动更改当前权限或审批策略；关闭会将现有 Auto 会话文件权限收紧为只读。',
+      catalogTitle: 'DSH 已配置模型', catalogNote: '仅列出当前活动 Provider 的已配置模型，不探测供应商或调用模型。清空专用路由后按原设置回退当前会话。',
+      catalogLoading: '正在读取模型目录…', catalogEmpty: '没有可用的已配置模型；请先在 DSH 模型设置中配置。', catalogFailed: '模型目录读取失败', catalogRefresh: '刷新模型目录', catalogRefreshing: '重新读取模型目录…',
+      chooseProvider: '选择 Provider', chooseModel: '选择 Model', clearRoute: '清空专用路由', providerDefault: '模型默认', unavailable: '不可用（保留原值）', checking: '等待目录核验（保留原值）',
+      unavailableRoute: '此审查路由不在当前模型目录中；已保留草稿，请刷新、重新选择或清空专用路由。', unavailableEffort: '此 effort 不受所选模型支持；已保留草稿，请重新选择。', catalogRequired: '保存专用路由前必须成功读取模型目录。',
       field_enabled: '启用', field_reviewerProvider: '审查 Provider', field_reviewerModel: '审查 Model', field_reviewerEffort: '审查 Effort',
       field_fallbackToSessionRoute: '允许回退会话路由', field_maxContextBytes: '上下文字节预算', field_historyLimit: '历史条数预算',
       field_includeProjectInstructions: '加入项目指令', field_temperature: '温度', field_timeoutMs: '超时（毫秒）', field_logDecisions: '记录审查决定',
@@ -54,6 +58,10 @@ window.__ModuleLoader__.load({
       configuration: 'Configuration', save: 'Save', saving: 'Saving…', cancel: 'Cancel', saved: 'Saved (applies live)',
       reloadConfig: 'Reload config (discard draft)', stale: 'Configuration is stale; reload before reapplying edits.',
       safety: 'Official Settings owns persistence. Enabling only publishes Auto, without changing current permissions or approval policy. Disabling narrows existing Auto sessions to read-only file access.',
+      catalogTitle: 'Configured DSH models', catalogNote: 'Only configured models from active providers are listed; no provider probing or model calls. Clearing the dedicated route keeps the existing session-fallback setting.',
+      catalogLoading: 'Reading model catalog…', catalogEmpty: 'No configured models are available; configure models in DSH model settings first.', catalogFailed: 'Model catalog request failed', catalogRefresh: 'Refresh model catalog', catalogRefreshing: 'Reloading model catalog…',
+      chooseProvider: 'Choose provider', chooseModel: 'Choose model', clearRoute: 'Clear dedicated route', providerDefault: 'Model default', unavailable: 'Unavailable (value retained)', checking: 'Awaiting catalog (value retained)',
+      unavailableRoute: 'This reviewer route is absent from the current catalog; the draft is retained. Refresh, select another model, or clear the dedicated route.', unavailableEffort: 'This effort is not supported by the selected model; the draft is retained. Select another effort.', catalogRequired: 'Load the model catalog successfully before saving a dedicated route.',
       field_enabled: 'Enabled', field_reviewerProvider: 'Reviewer provider', field_reviewerModel: 'Reviewer model', field_reviewerEffort: 'Reviewer effort',
       field_fallbackToSessionRoute: 'Allow session-route fallback', field_maxContextBytes: 'Context byte budget', field_historyLimit: 'History item budget',
       field_includeProjectInstructions: 'Include project instructions', field_temperature: 'Temperature', field_timeoutMs: 'Timeout (ms)', field_logDecisions: 'Log review decisions',
@@ -171,35 +179,92 @@ window.__ModuleLoader__.load({
       error.code = result?.error?.code
       throw error
     }
-    function createSettingsIO(service, t = key => zh[key] || key) {
+    function createSettingsIO(service, t = key => zh[key] || key, isDisposed = () => false) {
+      const check = () => { if (isDisposed()) throw new Error('Client disposed') }
       return {
         async read() {
+          check()
           const result = unwrap(await service.describe(), t)
+          check()
           if (!result.writable) throw new Error(t('readOnly'))
           const matches = result.namespaces.filter(row => row.ns === 'auto-review-router')
           if (matches.length !== 1) throw new Error(t('noForm'))
           return matches[0]
         },
         async save(form, draft) {
+          check()
           if (!Number.isInteger(form?.revision)) throw new Error(t('missingRevision'))
-          return unwrap(await service.update(form.ns, validateDraft(draft, t), form.revision), t)
+          const value = unwrap(await service.update(form.ns, validateDraft(draft, t), form.revision), t)
+          check()
+          return value
         },
       }
     }
-    function RouterPage({ call, settings, t }) {
+    // Official session/modelCatalog is a global, zero-argument catalog read. Unlike
+    // llm.listModels (Host-only), it carries resolved reasoning metadata to clients.
+    function createCatalogIO(service, isDisposed = () => false, t = key => zh[key] || key) {
+      return async () => {
+        if (isDisposed()) throw new Error('Client disposed')
+        const value = unwrap(await service.modelCatalog(), t)
+        if (isDisposed()) throw new Error('Client disposed')
+        return value
+      }
+    }
+    function catalogModel(catalog, provider, model) {
+      return catalog?.groups.find(group => group.id === provider)?.models.find(row => row.id === model)
+    }
+    function catalogProblem(values, state, original, t) {
+      // Closing Auto must remain possible during outages, retaining the original
+      // dedicated route verbatim. This is UI validation only, not a Host policy.
+      const unchanged = ['reviewerProvider', 'reviewerModel', 'reviewerEffort'].every(key => values[key] === String(original?.[key] ?? '').trim())
+      if (!values.enabled && unchanged) return ''
+      if (!values.reviewerProvider || !values.reviewerModel) return '' // Config owns pair validation.
+      if (state.status !== 'ready') return t('catalogRequired')
+      const model = catalogModel(state.value, values.reviewerProvider, values.reviewerModel)
+      if (!model) return t('unavailableRoute')
+      if (values.reviewerEffort && !model.reasoning?.efforts.some(effort => effort.id === values.reviewerEffort)) return t('unavailableEffort')
+      return ''
+    }
+    function RouterPage({ call, settings, loadCatalog, t }) {
+      const lifetime = react.useRef({ active: true, status: 0, form: 0, catalog: 0 })
+      react.useEffect(() => {
+        lifetime.current.active = true
+        return () => {
+          lifetime.current.active = false
+          for (const key of ['status', 'form', 'catalog']) lifetime.current[key]++
+        }
+      }, [])
+      const current = (key, generation) => lifetime.current.active && lifetime.current[key] === generation
       const [status, setStatus] = react.useState(null)
       const [error, setError] = react.useState('')
       const [busy, setBusy] = react.useState(false)
-      const load = react.useCallback(() => {
-        setBusy(true)
-        setError('')
-        return call('read').then((value) => {
-          setStatus(value)
-        }).catch((err) => {
-          setError(err && err.message ? err.message : String(err))
-        }).finally(() => setBusy(false))
+      const load = react.useCallback(async () => {
+        if (!lifetime.current.active) return
+        const generation = ++lifetime.current.status
+        setBusy(true); setError('')
+        try {
+          const value = await call('read')
+          if (current('status', generation)) setStatus(value)
+        } catch (error) {
+          if (current('status', generation)) setError(error?.message || String(error))
+        } finally { if (current('status', generation)) setBusy(false) }
       }, [call])
-      react.useEffect(() => { load() }, [load])
+      react.useEffect(() => { load(); return () => { lifetime.current.status++ } }, [load])
+
+      const [catalog, setCatalog] = react.useState({ value: null, status: 'idle', error: '' })
+      const reloadCatalog = react.useCallback(async () => {
+        if (!lifetime.current.active) return
+        const generation = ++lifetime.current.catalog
+        // Do not offer a stale directory while refreshing. Draft values never change.
+        setCatalog({ value: null, status: 'loading', error: '' })
+        try {
+          const value = await loadCatalog()
+          if (current('catalog', generation)) setCatalog({ value, status: 'ready', error: '' })
+        } catch (error) {
+          if (current('catalog', generation)) setCatalog({ value: null, status: 'error', error: error?.message || String(error) })
+        }
+      }, [loadCatalog])
+      react.useEffect(() => { reloadCatalog(); return () => { lifetime.current.catalog++ } }, [reloadCatalog])
 
       const [form, setForm] = react.useState(null)
       const [draft, setDraft] = react.useState(null)
@@ -207,27 +272,75 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = react.useState(false)
       const [notice, setNotice] = react.useState('')
       const reloadForm = react.useCallback(async () => {
-        setSaving(true)
-        setFormError('')
+        if (!lifetime.current.active) return
+        const generation = ++lifetime.current.form
+        setSaving(true); setFormError('')
         try {
           const value = await settings.read()
-          setForm(value); setDraft({ ...value.value }); setNotice('')
-        } catch (error) { setFormError(error.message) }
-        finally { setSaving(false) }
+          if (current('form', generation)) { setForm(value); setDraft({ ...value.value }); setNotice('') }
+        } catch (error) { if (current('form', generation)) setFormError(error.message) }
+        finally { if (current('form', generation)) setSaving(false) }
       }, [settings])
-      react.useEffect(() => { reloadForm() }, [reloadForm])
+      react.useEffect(() => { reloadForm(); return () => { lifetime.current.form++ } }, [reloadForm])
       const save = async () => {
+        if (!lifetime.current.active || saving) return
+        const generation = ++lifetime.current.form
         setSaving(true); setFormError(''); setNotice('')
         try {
-          const value = await settings.save(form, draft)
-          setForm(value); setDraft({ ...value.value }); setNotice(t('saved'))
-          await load()
+          const values = validateDraft(draft, t)
+          const problem = catalogProblem(values, catalog, form?.value, t)
+          if (problem) throw new Error(problem)
+          const value = await settings.save(form, values)
+          if (current('form', generation)) {
+            setForm(value); setDraft({ ...value.value }); setNotice(t('saved'))
+            await load()
+          }
         } catch (error) {
           // Never advance the revision or discard edits after a refusal.
-          setFormError(error.code === 'settings/conflict' ? `${t('stale')} ${error.message}` : error.message)
-        } finally { setSaving(false) }
+          if (current('form', generation)) setFormError(error.code === 'settings/conflict' ? `${t('stale')} ${error.message}` : error.message)
+        } finally { if (current('form', generation)) setSaving(false) }
       }
       const dirty = !!form && JSON.stringify(draft) !== JSON.stringify(form.value)
+      const groups = catalog.value?.groups || []
+      const selectedProvider = groups.find(group => group.id === draft?.reviewerProvider)
+      const selectedModel = catalogModel(catalog.value, draft?.reviewerProvider, draft?.reviewerModel)
+      const efforts = selectedModel?.reasoning?.efforts || []
+      const defaultEffort = efforts.find(effort => effort.id === selectedModel?.reasoning?.defaultEffort)
+      const ready = catalog.status === 'ready'
+      const problem = draft ? catalogProblem(draft, catalog, form?.value, t) : ''
+      const retainedOption = value => h('option', { value, disabled: true }, `${value} — ${t(ready ? 'unavailable' : 'checking')}`)
+      const select = (key, options, onChange, disabled = false) => h('select', {
+        'aria-label': key, value: draft[key] ?? '', disabled: saving || disabled, onChange,
+      }, ...options)
+      const changeProvider = event => {
+        const provider = event.target.value
+        setDraft(previous => provider === previous.reviewerProvider ? previous : { ...previous, reviewerProvider: provider, reviewerModel: '', reviewerEffort: '' })
+      }
+      const changeModel = event => {
+        const model = event.target.value
+        setDraft(previous => {
+          const info = catalogModel(catalog.value, previous.reviewerProvider, model)
+          const compatible = info?.reasoning?.efforts.some(effort => effort.id === previous.reviewerEffort)
+          return { ...previous, reviewerModel: model, reviewerEffort: compatible ? previous.reviewerEffort : '' }
+        })
+      }
+      const routeControl = key => {
+        if (key === 'reviewerProvider') return select(key, [
+          h('option', { value: '' }, t('chooseProvider')),
+          ...(draft[key] && !selectedProvider ? [retainedOption(draft[key])] : []),
+          ...groups.map(group => h('option', { key: group.id, value: group.id }, `${group.name} (${group.id})`)),
+        ], changeProvider, !ready)
+        if (key === 'reviewerModel') return select(key, [
+          h('option', { value: '' }, t('chooseModel')),
+          ...(draft[key] && !selectedModel ? [retainedOption(draft[key])] : []),
+          ...(selectedProvider?.models || []).map(model => h('option', { key: model.id, value: model.id }, `${model.name} (${model.id})`)),
+        ], changeModel, !ready || !selectedProvider)
+        return select(key, [
+          h('option', { value: '' }, `${t('providerDefault')}${defaultEffort ? ` — ${defaultEffort.name} (${defaultEffort.id})` : ''}`),
+          ...(draft[key] && !efforts.some(effort => effort.id === draft[key]) ? [retainedOption(draft[key])] : []),
+          ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, `${effort.name} (${effort.id})`)),
+        ], event => setDraft(previous => ({ ...previous, reviewerEffort: event.target.value })), !ready || !selectedModel || (!efforts.length && !draft[key]))
+      }
       const reg = status ? status.registration : null
       const route = status ? status.route : null
       return h('div', { style: pageStyle },
@@ -238,19 +351,30 @@ window.__ModuleLoader__.load({
         h('section', { style: cardStyle },
           h('h3', null, t('configuration')),
           h('p', null, t('safety')),
+          h('h4', null, t('catalogTitle')),
+          h('p', null, t('catalogNote')),
+          h('button', { type: 'button', disabled: saving, style: btnStyle, onClick: reloadCatalog }, catalog.status === 'loading' ? t('catalogRefreshing') : t('catalogRefresh')),
+          catalog.status === 'loading' ? h('p', { role: 'status' }, t('catalogLoading')) : null,
+          catalog.error ? h('p', { role: 'alert' }, `${t('catalogFailed')}: ${catalog.error}`) : null,
+          ready && !groups.length ? h('p', { role: 'status' }, t('catalogEmpty')) : null,
+          ...(catalog.value?.failures || []).map(failure => h('p', { key: failure.id, role: 'alert' }, `${failure.name} (${failure.id}): ${failure.message}`)),
+          ready && draft?.reviewerModel && !selectedModel ? h('p', { role: 'alert' }, t('unavailableRoute')) : null,
+          ready && selectedModel && draft?.reviewerEffort && !efforts.some(effort => effort.id === draft.reviewerEffort) ? h('p', { role: 'alert' }, t('unavailableEffort')) : null,
+          problem && !ready ? h('p', { role: 'status' }, problem) : null,
           formError ? h('p', { role: 'alert', style: { color: '#dc2626' } }, formError) : null,
           notice ? h('p', { role: 'status' }, notice) : null,
           draft ? h('form', { onSubmit: (event) => { event.preventDefault(); if (!saving) save() } },
             ...formFields.map(([key, type, min, max]) => h('label', { key, style: { display: 'flex', alignItems: 'center', gap: 10, margin: '8px 0' } },
               h('span', { style: { minWidth: 185 } }, t('field_' + key)),
-              h('input', {
-                'aria-label': key, type: type === 'boolean' ? 'checkbox' : type === 'number' ? 'number' : 'text',
+              type === 'string' ? routeControl(key) : h('input', {
+                'aria-label': key, type: type === 'boolean' ? 'checkbox' : 'number',
                 disabled: saving, ...(type === 'boolean' ? { checked: draft[key] === true } : { value: draft[key] ?? '' }),
                 ...(type === 'number' ? { min, max, step: key === 'temperature' ? 'any' : 1 } : {}),
                 onChange: (event) => setDraft(previous => ({ ...previous, [key]: type === 'boolean' ? event.target.checked : event.target.value })),
               }),
             )),
-            h('button', { type: 'submit', disabled: saving || !dirty, style: btnStyle }, saving ? t('saving') : t('save')),
+            h('button', { type: 'button', disabled: saving || !(draft.reviewerProvider || draft.reviewerModel || draft.reviewerEffort), style: btnStyle, onClick: () => { setDraft(previous => ({ ...previous, reviewerProvider: '', reviewerModel: '', reviewerEffort: '' })); setFormError(''); setNotice('') } }, t('clearRoute')),
+            h('button', { type: 'submit', disabled: saving || !dirty || !!problem, style: btnStyle }, saving ? t('saving') : t('save')),
             h('button', { type: 'button', disabled: saving || !dirty, style: btnStyle, onClick: () => { setDraft({ ...form.value }); setFormError(''); setNotice('') } }, t('cancel')),
           ) : null,
           h('button', { type: 'button', disabled: saving, style: btnStyle, onClick: reloadForm }, t('reloadConfig')),
@@ -294,7 +418,7 @@ window.__ModuleLoader__.load({
     }
 
     const name = 'dsh-auto-review-router'
-    const inject = ['slots', 'locale', 'remote', 'remote.settings']
+    const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.session']
     function apply(ctx) {
       console.info('[dsh-auto-review-router] client 已加载')
       try {
@@ -324,6 +448,7 @@ window.__ModuleLoader__.load({
           if (service !== undefined) {
             if (typeof service[method] !== 'function') throw new Error(`Host 缺少 ${method}`)
             const result = await service[method]()
+            if (disposed) throw new Error('Client disposed')
             if (!result || result.ok !== true) {
               const message = result && result.error ? (result.error.message || String(result.error)) : 'remote 调用失败'
               throw new Error(message)
@@ -336,13 +461,14 @@ window.__ModuleLoader__.load({
       }
       // 注册字段对齐官方范本（dsh-client-ui-settings-plugins / plugin-inventory）：name/id/order/label/locale/inject。
       // locale: NS 让槽渲染器把 label 绑定到本包字典命名空间并随语言切换刷新。
-      const settingsIO = createSettingsIO(ctx.get('remote.settings'), t)
+      const settingsIO = createSettingsIO(ctx.get('remote.settings'), t, () => disposed)
+      const loadCatalog = createCatalogIO(ctx.get('remote.session'), () => disposed, t)
       const entry = {
         tabId: 'auto-review-router-tab',
         order: 50,
         label: () => t('nav'),
         locale: NS,
-        inject: () => ({ call, settings: settingsIO, t }),
+        inject: () => ({ call, settings: settingsIO, loadCatalog, t }),
       }
       // ctx.slots.inject 是等待语义：槽未声明时回调不执行、不抛错（renderer Slots.inject 用
       // subscribeDeclaration 等待声明），因此 try/catch 回退永远不触发；诊断只能靠探针 + 日志。
@@ -374,6 +500,7 @@ window.__ModuleLoader__.load({
     exports.dictionaries = { zh, en }
     exports.validateDraft = validateDraft
     exports.createSettingsIO = createSettingsIO
+    exports.createCatalogIO = createCatalogIO
     exports.RouterPage = RouterPage
     exports.apply = apply
     exports.inject = inject

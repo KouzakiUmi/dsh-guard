@@ -45,6 +45,7 @@ for (const language of ['zh', 'en']) {
   const react = {
     createElement(type, props, ...children) { return { type, props: props || {}, children: children.flat(Infinity).filter(Boolean) } },
     useState(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = initial; return [hooks[index], value => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value }] },
+    useRef(initial) { const index = cursor++; if (!(index in hooks)) hooks[index] = { current: initial }; return hooks[index] },
     useCallback(fn, deps) { const index = cursor++; const previous = hooks[index]; if (!previous || deps.some((value, i) => value !== previous.deps[i])) hooks[index] = { fn, deps }; return hooks[index].fn },
     useEffect(fn, deps) { const index = cursor++; const previous = hooks[index]; if (!previous || deps.some((value, i) => value !== previous[i])) { hooks[index] = deps; pendingEffects.push(fn) } },
   }
@@ -62,7 +63,8 @@ for (const language of ['zh', 'en']) {
     },
   }, t)
   const call = async () => ({ plugin: 'dsh-auto-review-router', enabled: false, registration: { observed: true, registered: false, conflict: false }, route: { source: 'session-fallback' }, budget: {} })
-  const render = () => { cursor = 0; tree = ui.RouterPage({ call, settings, t }); for (const effect of pendingEffects.splice(0)) effect(); return tree }
+  const loadCatalog = async () => ({ groups: [], failures: [] })
+  const render = () => { cursor = 0; tree = ui.RouterPage({ call, settings, loadCatalog, t }); for (const effect of pendingEffects.splice(0)) effect(); return tree }
   const walk = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(walk)] : []
   const text = node => typeof node === 'object' ? node.children.map(text).join(' ') : String(node)
   const button = key => walk(tree).find(node => node.type === 'button' && text(node) === t(key))

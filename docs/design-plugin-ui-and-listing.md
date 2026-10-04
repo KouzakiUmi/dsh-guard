@@ -10,6 +10,7 @@
 - 审计固定每轮快照；stateDir 普通字段不热切换，未实现 gitSnapshot 不提供可用开关。审查固定每次请求快照；启停不得把会话自动提升到完全访问，也不得改变用户 approval policy。
 - schema 等官方 API 作为 peer 声明，撤销旧版一律禁止 `@deepseek-ai/*` 导入的自设限制；禁止捆绑核心副本或手工改真实 profile 依赖树。
 - 设置验收增加真实隔离 Loader/Settings/ConfigEditor 组合、编辑/保存/冲突/热生效回归。当前真实 GUI 上线验收另列，不由离线通过推定。
+- 0.2.2 自动审查使用官方 `remote.session.modelCatalog()` 返回的已配置 provider/model 分组及 reasoning 元信息进行选择，不另造模型白名单，不提供 provider/model 文本框，不发模型请求。目录失败/空列表/失效旧值要明示，模型切换不得带入不兼容 effort；安全关闭不依赖目录是否可用。
 
 ---
 > 参考仓库：`D:\dsh-subusage`（手写 client.js、已被精选列表收录的同类插件）。
