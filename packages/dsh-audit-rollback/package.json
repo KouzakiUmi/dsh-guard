@@ -1,7 +1,7 @@
 {
   "name": "dsh-audit-rollback",
   "displayName": "审计与回滚（audit ledger + rollback）",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Persistent audit ledger + precise rollback for DeepSeek Harness file-tool edits: capture pre-edit bytes into a content-addressed store per turn, roll back offline via a standalone CLI.",
   "type": "module",

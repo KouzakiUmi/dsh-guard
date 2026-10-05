@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync, linkSync, readdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
-import { initState, appendEntry, capturePath, createTurnState, readAllEntries, ledgerFile, sha1Hex } from '../lib/ledger.js'
+import { initState, appendEntry, capturePath, createTurnState, readAllEntries, ledgerFile, sha1Hex, existingPathGuards } from '../lib/ledger.js'
 import { createRollbackApi } from '../lib/rollback-preview.js'
 // lib/index.js 经 config.js 依赖 schemastery：必须等 bootstrap 的解析钩子评估后再动态导入。
 const { apply } = await import('../lib/index.js')
@@ -197,6 +197,47 @@ try {
       service.restore({ sessionId: 'nonexistent-session', entryId: 'entry-' + 'a'.repeat(64), nonce: '01234567-0123-4123-8123-012345678901', expectedCurrentHash: 'absent' }),
       /SESSION_VERIFIER_UNAVAILABLE/,
     )
+  })
+
+  // 2026-10-05 新缺陷：祖先目录尚不存在时，probeFile 把 ENOENT 冒泡成读失败，
+  // 导致「在新建目录里首次创建文件」完全不落 capture，该文件此后不可回滚。
+  // 修复：pathGuards 遇祖先 ENOENT 终止遍历并返回已验证段，probeFile 据此记 existed:false。
+  await test('MEDIUM-6 ancestor ENOENT: capture in a not-yet-created directory is recorded', async () => {
+    const dir = join(root, 'medium6'); mkdirSync(dir)
+    const stateDir = join(dir, 'state'); initState(stateDir)
+    const sessionId = 'medium6-session'
+    const fresh = join(dir, 'not-created-yet', 'deep', 'new.txt')
+    const turnState = createTurnState()
+    appendEntry(stateDir, { kind: 'turn/start', session: sessionId, turn: 1, cwd: dir })
+
+    // 父目录不存在：必须记 existed:false 的 capture，而不是抛错。
+    const before = capturePath(stateDir, {
+      session: sessionId, turn: 1, path: fresh, phase: 'before',
+      tool: 'write', callId: 'c1', maxBytes: 65536, turnState,
+    })
+    assert.ok(before, 'before capture 必须落账')
+    assert.equal(before.existed, false, '尚不存在的文件记 existed:false')
+    assert.ok(turnState.capturedPaths.has(fresh), '纳入本轮捕获集合，turn/end 会补 after')
+
+    // 建好目录与文件后，after 必须正常捕获到内容。
+    mkdirSync(join(dir, 'not-created-yet', 'deep'), { recursive: true })
+    writeFileSync(fresh, 'hello')
+    const after = capturePath(stateDir, {
+      session: sessionId, turn: 1, path: fresh, phase: 'after',
+      maxBytes: 65536, turnState,
+    })
+    assert.ok(after && after.existed === true, '目录建好后 after 正常捕获')
+    assert.equal(after.bytes, 5)
+
+    // 祖先是普通文件（ENOTDIR）仍必须 fail-closed，绝不放行。
+    const blocker = join(dir, 'blocker'); writeFileSync(blocker, 'x')
+    assert.throws(() => capturePath(stateDir, {
+      session: sessionId, turn: 2, path: join(blocker, 'child.txt'), phase: 'before',
+      tool: 'write', callId: 'c2', maxBytes: 65536, turnState: createTurnState(),
+    }), /capture\/before 读取失败/, 'ENOTDIR 仍是读失败，不得当不存在')
+
+    // 状态目录侧的严格路径不受影响：祖先缺失必须抛 ANCESTOR_MISSING。
+    assert.throws(() => existingPathGuards(join(stateDir, 'no-such-dir', 'x.json')), /ANCESTOR_MISSING/)
   })
 
   console.log(`security-regressions: ${count} scenarios passed; temporary fixtures only`)

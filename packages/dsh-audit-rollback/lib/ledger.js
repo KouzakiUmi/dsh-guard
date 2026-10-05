@@ -106,12 +106,12 @@ export function safeMkdir(dir) {
     const parent = dirname(dir)
     if (parent === dir) throw new Error('UNSAFE_MISSING_ROOT')
     safeMkdir(parent)
-    pathGuards(dir)
+    existingPathGuards(dir)
     try { mkdirSync(dir) } catch (e) { if (e.code !== 'EEXIST') throw e }
     info = lstatSync(dir)
   }
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('UNSAFE_STATE_DIRECTORY')
-  pathGuards(join(dir, '.guard'))
+  existingPathGuards(join(dir, '.guard'))
 }
 
 function safeLeaf(file) {
@@ -125,7 +125,7 @@ function safeLeaf(file) {
 
 /** Append or create using the verified file descriptor; never truncate an existing file. */
 export function safeStateWrite(file, data, { append = false, exclusive = false } = {}) {
-  const guards = pathGuards(file)
+  const guards = existingPathGuards(file)
   const existing = safeLeaf(file)
   if (exclusive && existing) throw new Error('STATE_FILE_EXISTS')
   const fd = openSync(file, constants.O_WRONLY | (constants.O_NOFOLLOW || 0) |
@@ -134,7 +134,7 @@ export function safeStateWrite(file, data, { append = false, exclusive = false }
     const opened = fstatSync(fd)
     if (!opened.isFile() || opened.nlink !== 1 || (existing && (opened.dev !== existing.dev || opened.ino !== existing.ino))) throw new Error('STATE_FILE_EXCHANGED')
     const leaf = safeLeaf(file)
-    if (!leaf || leaf.dev !== opened.dev || leaf.ino !== opened.ino || !sameGuards(guards, pathGuards(file))) throw new Error('STATE_PATH_EXCHANGED')
+    if (!leaf || leaf.dev !== opened.dev || leaf.ino !== opened.ino || !sameGuards(guards, existingPathGuards(file))) throw new Error('STATE_PATH_EXCHANGED')
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8')
     let offset = 0
     while (offset < bytes.length) {
@@ -155,7 +155,7 @@ export function initState(stateDir) {
   safeMkdir(join(stateDir, 'ledger'))
   safeMkdir(join(stateDir, 'objects'))
   const stateFile = join(stateDir, 'state.json')
-  pathGuards(stateFile)
+  existingPathGuards(stateFile)
   if (!safeLeaf(stateFile)) safeStateWrite(stateFile, JSON.stringify({ version: 1, createdAt: new Date().toISOString() }) + '\n', { exclusive: true })
 }
 
@@ -179,10 +179,10 @@ export function putObject(stateDir, buffer) {
   const hash = sha1Hex(buffer)
   const file = objectPath(stateDir, hash)
   safeMkdir(dirname(file))
-  pathGuards(file)
+  existingPathGuards(file)
   if (!safeLeaf(file)) {
     try { safeStateWrite(file, buffer, { exclusive: true }) }
-    catch (error) { if (error.code !== 'EEXIST') throw error; pathGuards(file); safeLeaf(file) }
+    catch (error) { if (error.code !== 'EEXIST') throw error; existingPathGuards(file); safeLeaf(file) }
   }
   return hash
 }
@@ -290,7 +290,15 @@ export function fileIdentity(info) {
     size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }
 }
 
-/** No symlinks/reparse redirection, directories, ADS or lexical traversal. Missing leaf only. */
+/**
+ * 祖先链安全校验：每级目录必须是真实目录、非符号链接、realpath 与词法路径一致。
+ *
+ * 2026-10-05 修正：祖先目录**尚不存在**时，`lstatSync` 抛 ENOENT 原先会冒泡成
+ * `existed:null`（读失败），导致「在新建目录里首次创建文件」完全不落 capture，
+ * 新目录下的文件一律不可回滚。目录不存在不等于路径不安全——此时该终止向上遍历，
+ * 把已验证的那一段作为 guards 返回，由 probeFile 据此判定 existed:false。
+ * 其它错误（ENOTDIR/EACCES/EINVAL 等）仍然照旧冒泡，保持 fail-closed。
+ */
 export function pathGuards(absPath) {
   if (typeof absPath !== 'string' || !isAbsolute(absPath) || resolve(absPath) !== absPath ||
       absPath.includes('\0') || absPath.split(/[/\\]+/).includes('..') ||
@@ -300,7 +308,14 @@ export function pathGuards(absPath) {
   const guards = []
   let dir = dirname(absPath)
   for (;;) {
-    const info = lstatSync(dir)
+    let info
+    try {
+      info = lstatSync(dir)
+    } catch (error) {
+      // 祖先不存在：已验证段到此为止，交给调用方按「尚不存在」处理。
+      if (error && error.code === 'ENOENT') return { guards, missing: true }
+      throw error
+    }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('UNSAFE_ANCESTOR')
     const physical = realpathSync.native(dir)
     const equal = process.platform === 'win32' ? physical.toLowerCase() === dir.toLowerCase() : physical === dir
@@ -309,13 +324,27 @@ export function pathGuards(absPath) {
     if (dir === parse(dir).root) break
     dir = dirname(dir)
   }
+  return { guards, missing: false }
+}
+
+/**
+ * 严格版：祖先链必须完整存在，否则抛错。
+ * 状态目录与回滚票据等安全关键路径一律用这个——它们操作的路径本就应当存在，
+ * 出现 missing 说明有东西在期间被删或被换，必须 fail-closed 而不是继续。
+ */
+export function existingPathGuards(absPath) {
+  const { guards, missing } = pathGuards(absPath)
+  if (missing) throw new Error('ANCESTOR_MISSING')
   return guards
 }
 
 export function probeFile(absPath, maxBytes = Number.MAX_SAFE_INTEGER) {
   let fd
   try {
-    const guards = pathGuards(absPath)
+    const probe = pathGuards(absPath)
+    const guards = probe.guards
+    // 父目录链上有一段尚不存在：该路径此刻必然不存在，按 existed:false 记账。
+    if (probe.missing) return { existed: false, buffer: null, bytes: 0, identity: null, guards }
     let info
     try { info = lstatSync(absPath) }
     catch (error) {
@@ -342,7 +371,7 @@ export function probeFile(absPath, maxBytes = Number.MAX_SAFE_INTEGER) {
     }
     const buffer = Buffer.concat(chunks)
     if (buffer.length > maxBytes || JSON.stringify(fileIdentity(fstatSync(fd))) !== JSON.stringify(identity)) throw new Error('FILE_CHANGED_DURING_READ')
-    if (JSON.stringify(pathGuards(absPath)) !== JSON.stringify(guards) || lstatSync(absPath).ino !== opened.ino) throw new Error('PATH_EXCHANGED')
+    if (JSON.stringify(pathGuards(absPath).guards) !== JSON.stringify(guards) || lstatSync(absPath).ino !== opened.ino) throw new Error('PATH_EXCHANGED')
     return { existed: true, buffer, bytes: buffer.length, identity, guards }
   } catch (error) {
     if (!error.code) error.code = 'EUNSAFE'

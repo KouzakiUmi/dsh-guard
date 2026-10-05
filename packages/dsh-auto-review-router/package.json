@@ -1,6 +1,6 @@
 {
   "name": "dsh-auto-review-router",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "可指定模型的 Auto 审查：reviewer 路由来自插件配置，缺省回退当前会话。",
   "type": "module",
@@ -19,10 +19,11 @@
     "cordis.patch.yml",
     "README.zh.md",
     "lib/config.js",
+    "lib/grant-store.js",
     "lib/approval-history.js"
   ],
   "scripts": {
-    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/loader-settings.mjs && node test/pending-schema.mjs && node test/manual-config.mjs && node test/configured-model-picker.mjs && node test/settings.mjs && node test/history-ui.mjs && node test/approval-history.mjs && node test/manual-fallback.mjs && node test/lifecycle.mjs"
+    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/loader-settings.mjs && node test/pending-schema.mjs && node test/manual-config.mjs && node test/configured-model-picker.mjs && node test/settings.mjs && node test/history-ui.mjs && node test/approval-history.mjs && node test/grant-store.mjs && node test/manual-fallback.mjs && node test/audit-stall.mjs && node test/failed-unload.mjs && node test/lifecycle.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

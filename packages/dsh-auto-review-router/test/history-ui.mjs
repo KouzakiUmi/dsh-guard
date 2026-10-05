@@ -142,7 +142,9 @@ for (const language of ['zh', 'en']) {
   assert.ok(r.render({ ...state, records: [], nextCursor: null }).text.includes(r.client.dictionaries[language].historyEmpty))
   const gap = r.render({ ...state, records: [], nextCursor: null, health: health({ gap: true, corruptRecords: 1 }) }); assert.ok(gap.text.includes(r.client.dictionaries[language].historyGap)); assert.equal(gap.text.includes(r.client.dictionaries[language].historyEmpty), false)
   assert.ok(r.render(state, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 1 }).text.includes(r.client.dictionaries[language].historyTimeout))
-  assert.equal(r.render({ ...state, records: [record(1)] }, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 1 }).tree, null, '纯 allow 不渲染')
+  // 2026-10-05 用户裁定：审批结果要在工具调用条目下可见，纯放行也渲染。
+  assert.ok(r.render({ ...state, records: [record(1)] }, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 1 }).text
+    .includes(r.client.dictionaries[language].history_reviewer_allow), '纯 allow 现在渲染')
   assert.equal(r.render(state, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 2 }).tree, null, '其它轮次不渲染')
   assert.equal(r.render(state, { blank: true }, 'A', 'ApprovalTurnCard', { turn: 1 }).tree, null)
 }
@@ -156,7 +158,10 @@ console.log('PASS actual history/turnTail card: safe text, dispatch stages/manua
   assert.equal(card([], { error: 'service-unavailable' }).tree, null, 'RPC 服务不可用不渲染')
   assert.equal(card([], { error: 'history-unavailable' }).tree, null, '账本读取失败不渲染')
   assert.equal(card([], { health: null, status: 'loading' }).tree, null, '读取中不渲染')
-  assert.equal(card([record(1), record(2, { phase: 'reported-result', outcome: 'reported-ok' })]).tree, null, 'allow+reported-ok 不常驻打扰')
+  // 2026-10-05 用户裁定：纯放行也渲染，但一个 dispatch 只出一张卡（取最需注意的那条）。
+  const allowChain = card([record(1), record(2, { phase: 'reported-result', outcome: 'reported-ok' })])
+  assert.ok(allowChain.text.includes(zh.historyPhase_reviewer), 'allow 链现在渲染')
+  assert.equal(allowChain.text.includes('+1'), false, '同一 dispatch 多阶段只出一张卡')
   assert.ok(card([record(3, { phase: 'reviewer', outcome: 'deny' })]).text.includes(zh.history_reviewer_deny))
   assert.ok(card([record(4, { phase: 'downstream', outcome: 'deny' })]).text.includes(zh.history_downstream_deny))
   assert.ok(card([record(5, { phase: 'manual', outcome: 'rejected' })]).text.includes(zh.history_manual_rejected))
@@ -165,7 +170,7 @@ console.log('PASS actual history/turnTail card: safe text, dispatch stages/manua
   assert.ok(card([record(7, { phase: 'reviewer', outcome: 'deny', turn: 2 })], {}, 2).text.includes(zh.history_reviewer_deny), '按轮次归属渲染')
   assert.equal(card([record(8, { phase: 'reviewer', outcome: 'deny', turn: null })]).tree, null, '无轮次归属不渲染')
 }
-console.log('PASS turnTail card gates: no error/loading/empty/allow-only rendering; deny/timeout render per turn')
+console.log('PASS turnTail card gates: no error/loading/empty rendering; allow/deny/timeout render per turn, one card per dispatch')
 
 // Tab 错误文案区分：服务不可用（RPC/挂载类）不得误标为账本读取失败。
 {

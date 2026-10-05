@@ -8,6 +8,7 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
 import { createApprovalHistory, parseHistoryRequest, parseHistoryResult } from './approval-history.js'
+import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf, setCanonicalPath } from './grant-store.js'
 export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
@@ -250,7 +251,16 @@ function exposeRouterRemote(ctx) {
 export function apply(ctx, rawConfig, historyOptions) {
   const readConfig = () => normalizeConfig(rawConfig)
   const history = createApprovalHistory(ctx, historyOptions)
-  const snap = { readConfig, history, attempted: false, registered: false, conflict: false, closeFailed: false, error: null }
+  // 授权记忆：与审批历史同在 profile 目录，取不到目录时禁用记忆（退化为每次询问）。
+  let grants = null
+  try {
+    const profileDir = ctx.profileContext?.dir
+    if (typeof profileDir === 'string' && profileDir !== '') grants = createGrantStore(grantLedgerPath(profileDir))
+  } catch (error) {
+    ctx.logger?.warn?.(`auto-review-router: 授权记忆不可用，将每次询问：${error instanceof Error ? error.message : String(error)}`)
+    grants = null
+  }
+  const snap = { readConfig, history, grants, attempted: false, registered: false, conflict: false, closeFailed: false, error: null }
   runtimeByCtx.set(ctx, snap)
   const offHistorySession = ctx.on?.('session/event', (session, event) => history.sessionEvent(session, event))
   const offHistoryResult = ctx.on?.('tools/result', (exec, result) => history.result(exec, result))
@@ -319,7 +329,7 @@ export function apply(ctx, rawConfig, historyOptions) {
       }
       return reviewGate(ctx, readConfig(), state, exec, next, history)
     }, { prepend: true })
-    const state = { accepting: true, active: new Set(), lifecycle: new AbortController(), warnedCwd: false, warnedHistory: false }
+    const state = { accepting: true, active: new Set(), lifecycle: new AbortController(), warnedCwd: false, warnedHistory: false, grants }
     snap.attempted = true
     snap.conflict = false
     snap.error = null
@@ -426,10 +436,44 @@ async function reviewGate(ctx, config, state, exec, next, history) {
   }
 }
 
+/** 授权记忆访问器：store 缺失时返回一个恒不命中的替身（退化为每次询问）。 */
+function grantMemoFor(state, exec) {
+  const store = state.grants
+  if (store === null || store === undefined) return NOOP_GRANTS
+  return store
+}
+
+const NOOP_GRANTS = {
+  check() { return { hit: false, reason: 'store-unavailable' } },
+  remember() { return { ok: false, reason: 'store-unavailable' } },
+}
+
+const sessionIdOf = (session) => (session && typeof session.id === 'string' ? session.id : 'unknown')
+
 async function manualFallback(ctx, config, state, exec, decision, history, entry) {
   const { risk, reason } = decision
   // effectivePolicy includes the configured default; overrideOf alone can miss never.
   if (approvalPolicy(ctx, exec.agent.session) === 'never') return denied(exec.name, reason)
+
+  // 授权记忆：仅 medium 风险可被抑制（high 每次必问，policy.js 规定 high 必 deny）。
+  // 命中只是「不再打扰」，不改变任何权限——上游 reviewer 与下游门都已各自判过。
+  if (risk === 'medium') {
+    const memo = grantMemoFor(state, exec)
+    const target = targetPathOf(exec.arguments)
+    const opClass = operationClassOf(exec.name, exec.arguments)
+    if (target !== undefined && opClass !== undefined) {
+      let hit = { hit: false, reason: 'no-store' }
+      try { hit = memo.check(target, opClass) } catch { hit = { hit: false, reason: 'check-failed' } }
+      if (hit.hit) {
+        history.record(entry, 'manual', 'allowed-once', { cause: 'granted-directory' })
+        return { kind: 'allow' }
+      }
+      if (entry) entry.grantMissReason = hit.reason
+    } else if (entry) {
+      entry.grantMissReason = target === undefined ? 'no-target-path' : 'unknown-op-class'
+    }
+  }
+
   if (typeof ctx.approval?.request !== 'function') {
     history.manualOutcome(entry, 'unavailable')
     return denied(exec.name, 'official approval channel unavailable')
@@ -454,13 +498,17 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
   const deadlineMono = performance.now() + ms
   const seconds = Math.ceil(ms / 1000)
   const timer = setTimeout(() => abort('timeout'), ms)
+  // 审批提示必须让人看懂「到底要批什么」：把工具名与调用摘要拼进 displayReason。
+  const summary = summarizeCall(exec)
+  const riskLabel = risk === 'high' ? { en: 'high', zh: '高危' } : { en: 'medium', zh: '中风险' }
+  const detail = summary === undefined ? '' : `\n${summary}`
   try {
     const response = await history.invokeManual(entry, () => ctx.approval.request({
       agent: exec.agent, toolName: exec.name, callId: exec.callId,
-      reason: askUser(exec.name, reason).reason,
+      reason: `${askUser(exec.name, reason).reason}${summary === undefined ? '' : ` — ${summary}`}`,
       displayReason: {
-        en: `Automatic review classified this as ${risk} risk. Allow once? No response within ${seconds} seconds means rejection.`,
-        zh: `自动审批判断为${risk === 'high' ? '高危' : '中风险'}操作，是否放行？${seconds}秒未响应自动拒绝。`,
+        en: `Automatic review classified this ${riskLabel.en}-risk call to "${exec.name}" as needing a human decision. Allow once? No response within ${seconds} seconds means rejection.${detail}`,
+        zh: `自动审批判断工具「${exec.name}」为${riskLabel.zh}操作，需要你决定是否放行。${seconds}秒未响应自动拒绝。${detail}`,
       },
       signal: controller.signal,
     }))
@@ -472,7 +520,24 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
     const final = controller.signal.aborted ? 'cancelled' : outcome
     history.manualOutcome(entry, final)
     if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
-    if (final === 'allowed-once') return { kind: 'allow' }
+    if (final === 'allowed-once') {
+      // R6：只有用户显式放行才写记忆。放行本身即显式授权，写入失败也只是退回「下次再问」。
+      if (risk === 'medium' && entry?.approvalRequestId) {
+        const memo = grantMemoFor(state, exec)
+        const target = targetPathOf(exec.arguments)
+        const opClass = operationClassOf(exec.name, exec.arguments)
+        if (target !== undefined && opClass !== undefined) {
+          try {
+            memo.remember(target, opClass, {
+              session: sessionIdOf(exec.agent?.session),
+              tool: exec.name,
+              approvalRequestId: entry.approvalRequestId,
+            })
+          } catch { /* 记不住就下次再问，不影响本次放行 */ }
+        }
+      }
+      return { kind: 'allow' }
+    }
     return denied(exec.name, final === 'cancelled' && entry?.abortCause === 'timeout'
       ? 'manual approval timed out' : `manual approval ${final}`)
   } finally {
@@ -585,6 +650,32 @@ function denied(toolName, reason) {
       ...reason === undefined ? {} : { reason },
     },
   }
+}
+
+/**
+ * 人工审批请求要展示的具体调用摘要。审批提示必须让人看懂「到底要批什么」，
+ * 因此把路径/命令等白名单键拼进 displayReason。
+ * 只取白名单键、清理控制字符并裁剪长度；识别不出返回 undefined，绝不猜。
+ * 刻意不写入审批历史账本：账本 DTO 无此字段，命令正文亦属敏感内容。
+ */
+export function summarizeCall(exec) {
+  const args = exec && typeof exec.arguments === 'object' && exec.arguments !== null ? exec.arguments : null
+  if (args === null) return undefined
+  const clean = value => (typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').trim() : '')
+  const clip = (value, max) => (value.length > max ? `${value.slice(0, max)}…` : value)
+  const parts = []
+  for (const key of ['file_path', 'filePath', 'path', 'filename', 'notebook_path']) {
+    const value = clean(args[key])
+    if (value) { parts.push(`${key}=${clip(value, 200)}`); break }
+  }
+  const command = clean(args.command)
+  if (command) parts.push(`command=${clip(command, 300)}`)
+  for (const key of ['old_string', 'new_string', 'content', 'pattern', 'url', 'glob']) {
+    const value = clean(args[key])
+    if (value) { parts.push(`${key}=${clip(value, 120)}`); break }
+  }
+  if (!parts.length) return undefined
+  return clip(parts.join('  '), 600)
 }
 
 function askUser(toolName, reason) {

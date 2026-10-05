@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
       historyTitle: '审批历史', historyScope: '当前会话持久审批历史；结果提示在对应轮次的消息流卡片展示，不是聊天或轨迹工具卡片徽章。',
       historyExecutionNote: '审查允许 ≠ 工具已执行；未收到执行报告时结果未知。', historyLoading: '正在读取审批历史…', historyFailed: '审批历史读取失败（保留已读记录）',
       historyEmpty: '当前会话没有审批记录。', historyNoSession: '请先选择会话。', historyBlank: '请先开始会话。', historyGap: '历史可能不完整或不可用，请检查审计健康状态。',
-      historyServiceUnavailable: '审批历史服务不可用（插件未启用或尚未产生审批记录），这不是账本读取失败。',
+      historyServiceUnavailable: '无法调用审批历史服务：Host 端插件未加载、RPC 未挂载，或返回内容不合法。这不是账本读取失败——账本本身可能完好。请检查 dsh-auto-review-router 是否处于启用状态，并查看宿主日志。',
       historyTurnCardMore: '条同类结果',
       historyRisk: '风险', historyRoute: '审查路由', historyLocation: '轮次 / 步骤 / 调用', historyUnknown: '未知', historyUnlinked: '未建立唯一调用关联', historyInspect: '在轨迹中查看调用', historyOlder: '加载更早记录', historyTimeout: '人工审批超时，已拒绝',
       historyPhase_reviewer: '自动审查', historyPhase_downstream: '权限审批', historyPhase_manual: '人工审批', 'historyPhase_reported-result': '工具执行报告',
@@ -87,7 +87,7 @@ window.__ModuleLoader__.load({
       historyTitle: 'Approval history', historyScope: 'Durable history for this session. Result reminders appear as message-flow cards on their turn, not as chat or trajectory tool-card badges.',
       historyExecutionNote: 'Review allow ≠ tool execution; execution is unknown without a reported result.', historyLoading: 'Reading approval history…', historyFailed: 'Approval history read failed (retaining loaded records)',
       historyEmpty: 'No approval records for this session.', historyNoSession: 'Select a session first.', historyBlank: 'Start a conversation first.', historyGap: 'History may be incomplete or unavailable; check audit health.',
-      historyServiceUnavailable: 'Approval history service is unavailable (the plugin is disabled or nothing has been recorded yet); this is not a ledger read failure.',
+      historyServiceUnavailable: 'Cannot reach the approval history service: the host plugin is not loaded, the RPC is not mounted, or the response failed validation. This is not a ledger read failure — the ledger itself may be intact. Check that dsh-auto-review-router is enabled and inspect the host log.',
       historyTurnCardMore: 'more like this',
       historyRisk: 'Risk', historyRoute: 'Reviewer route', historyLocation: 'Turn / step / call', historyUnknown: 'Unknown', historyUnlinked: 'No verified unique call association', historyInspect: 'Inspect call in trajectory', historyOlder: 'Load earlier records', historyTimeout: 'Manual approval timed out; rejected',
       historyPhase_reviewer: 'Auto review', historyPhase_downstream: 'Permission approval', historyPhase_manual: 'Manual approval', 'historyPhase_reported-result': 'Reported tool result',
@@ -643,13 +643,22 @@ window.__ModuleLoader__.load({
       const { source, state, blank } = useHistory(props), t = props.t
       const groups = groupHistory(state.records)
       const loading = ['loading', 'refreshing', 'loading-older'].includes(state.status)
+      const errorText = (code) => {
+        if (code === 'service-unavailable') return t('historyServiceUnavailable')
+        if (code === 'history-unavailable') return `${t('historyFailed')} · ${code}`
+        return `${t('historyFailed')} · ${code}`
+      }
       return h('section', { style: { ...pageStyle, flex: 1, minHeight: 0, overflowY: 'auto', overflowWrap: 'anywhere', boxSizing: 'border-box', width: '100%' } },
         h('h2', null, t('historyTitle')),
         h('p', null, t('historyScope')),
         h('p', null, t('historyExecutionNote')),
         state.sessionId === null ? h('p', { role: 'status' }, t(blank ? 'historyBlank' : 'historyNoSession')) : h('button', { type: 'button', style: btnStyle, disabled: loading || state.status === 'disposed', onClick: () => source.refresh() }, t('refresh')),
         loading ? h('p', { role: 'status' }, t('historyLoading')) : null,
-        state.error ? h('p', { role: 'alert' }, state.error === 'service-unavailable' ? t('historyServiceUnavailable') : `${t('historyFailed')} · ${state.error}`) : null,
+        // 2026-10-05 用户裁定：三类原因必须分开说，不能都归成「服务不可用」。
+        // - service-unavailable：RPC 挂载/传输/解析层失败，与账本内容无关。
+        // - history-unavailable：Host 侧明确回报账本不可用（真实读取失败）。
+        // - 其它业务码（invalid-request / session-not-found / session-unavailable）：按码显示。
+        state.error ? h('p', { role: 'alert' }, errorText(state.error, t)) : null,
         historyHealth(state.health, t),
         state.status === 'ready' && !groups.length && state.health.ready && !state.health.gap && !state.health.missingProfile && !state.health.closing ? h('p', { role: 'status' }, t('historyEmpty')) : null,
         ...groups.map(group => h('article', { key: group.dispatchId, style: cardStyle },
@@ -672,21 +681,47 @@ window.__ModuleLoader__.load({
       )
     }
     // conversation.chat.turnTail 卡片（官方消息流追加槽，与 deliverables/plan/schedule 卡并列，
-    // 渲染在每轮收尾 assistant 文本之后）。只在该轮存在值得关注的最终审批结果时出现：
-    // 人工拒绝/取消（含超时）、审查拒绝、权限拒绝。查询失败、服务不可用、读取中、无记录、
-    // 纯放行一律不渲染；错误与健康细节只在「审批历史」Tab 内展示。
-    const NOTEWORTHY = row => (row.phase === 'manual' && (row.outcome === 'rejected' || row.outcome === 'cancelled'))
-      || (row.phase === 'reviewer' && row.outcome === 'deny')
-      || (row.phase === 'downstream' && row.outcome === 'deny')
+    // 渲染在每轮收尾 assistant 文本之后）。
+    // 2026-10-05 用户裁定：审批结果应当在工具调用条目下可见，因此不再只挑「异常」——
+    // 每个被审查过的调用都出卡片，优先展示最需要注意的那条（拒绝/失败/人工介入/权限拒绝），
+    // 纯放行作为兜底展示。查询失败、服务不可用、读取中、无记录一律不渲染；
+    // 错误与健康细节仍只在「审批历史」Tab 内展示。
+    // 优先级：数字越小越优先；同优先级按 ledgerSeq 降序取最新。
+    const TURN_CARD_RANK = {
+      'manual:rejected': 0, 'manual:cancelled': 0, 'manual:unavailable': 0,
+      'manual:requested': 1, 'manual:allowed-once': 1,
+      'reviewer:deny': 2, 'reviewer:failure': 2, 'downstream:deny': 2, 'downstream:ask': 2,
+      'downstream:failure': 2, 'downstream:cancel': 2, 'reviewer:cancel': 3,
+      'reviewer:allow': 4, 'downstream:allow': 5,
+    }
+    // 人工「等待中」不是终态：同一 dispatch 若已有更晚的 manual 结果则不重复显示。
+    function turnCardRow(rows) {
+      const settled = new Set(rows.filter(row => row.phase === 'manual' && row.outcome !== 'requested')
+        .map(row => row.dispatchId))
+      const visible = rows.filter(row => !(row.phase === 'manual' && row.outcome === 'requested' && settled.has(row.dispatchId)))
+      if (!visible.length) return null
+      return [...visible].sort((a, b) => {
+        const rank = (TURN_CARD_RANK[`${a.phase}:${a.outcome}`] ?? 6) - (TURN_CARD_RANK[`${b.phase}:${b.outcome}`] ?? 6)
+        return rank !== 0 ? rank : b.ledgerSeq - a.ledgerSeq
+      })[0]
+    }
     function ApprovalTurnCard(props) {
       const { state } = useHistory(props), t = props.t
       if (state.sessionId === null || state.status === 'disposed' || state.error || state.health === null) return null
-      const rows = state.records.filter(row => row.turn === props.turn && NOTEWORTHY(row))
-      if (!rows.length) return null
-      const latest = rows[0] // store 内 records 按 ledgerSeq 降序
+      // 每个 dispatchId 归为一次「被审查的调用」；一张卡只讲最需要讲的那次调用。
+      const byDispatch = new Map()
+      for (const row of state.records) {
+        if (row.turn !== props.turn) continue
+        const key = typeof row.dispatchId === 'string' && row.dispatchId ? row.dispatchId : row.callId
+        if (!byDispatch.has(key)) byDispatch.set(key, [])
+        byDispatch.get(key).push(row)
+      }
+      const shown = [...byDispatch.values()].map(turnCardRow).filter(row => row !== null)
+      if (!shown.length) return null
+      const latest = shown[0]
       return h('div', { role: 'status', style: { padding: '4px 8px', overflowWrap: 'anywhere' } },
         `${safeText(latest.toolName, 160)} · ${t('historyPhase_' + latest.phase)}: ${outcomeText(latest, t)} · ${t('historyExecutionNote')}`,
-        rows.length > 1 ? ` · +${rows.length - 1} ${t('historyTurnCardMore')}` : null,
+        shown.length > 1 ? ` · +${shown.length - 1} ${t('historyTurnCardMore')}` : null,
       )
     }
 

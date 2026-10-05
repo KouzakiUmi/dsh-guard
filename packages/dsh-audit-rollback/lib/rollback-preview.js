@@ -4,7 +4,7 @@ import { parseRollbackRequest } from './rollback-remote.js'
 import { constants, openSync, closeSync, fstatSync, ftruncateSync, fsyncSync, writeSync,
   lstatSync, mkdirSync, writeFileSync, renameSync, unlinkSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
-import { appendEntry, readAllEntries, objectPath, probeFile, pathGuards, fileIdentity, sha1Hex, safeMkdir, safeStateWrite, canonicalPathKey } from './ledger.js'
+import { appendEntry, readAllEntries, objectPath, probeFile, existingPathGuards, fileIdentity, sha1Hex, safeMkdir, safeStateWrite, canonicalPathKey } from './ledger.js'
 
 export const UI_MAX_BYTES = 2 * 1024 * 1024
 const TTL = 120000
@@ -225,7 +225,7 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
           if (!info.isFile() || info.nlink !== 1) throw new Error('UNSAFE_OPEN_FILE_TYPE_OR_HARDLINK')
           if (view.current.existed && !same(fileIdentity(info), ticket.identity)) throw new Error('OPEN_IDENTITY_CONFLICT')
           if (!view.current.existed) createdIdentity = fileIdentity(info)
-          if (!same(pathGuards(view.row.path), ticket.guards)) throw new Error('ANCESTOR_EXCHANGED')
+          if (!same(existingPathGuards(view.row.path), ticket.guards)) throw new Error('ANCESTOR_EXCHANGED')
           if (view.current.existed) {
             const immediate = probeFile(view.row.path, UI_MAX_BYTES)
             if (!same(immediate.identity, ticket.identity) || publicVersion(immediate).hash !== expectedCurrentHash) throw new Error('OPEN_HASH_CONFLICT')
@@ -248,7 +248,7 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
         if (quarantined) {
           try {
             const moved = probeFile(quarantine, UI_MAX_BYTES)
-            if (!same(pathGuards(view.row.path), ticket.guards) || moved.existed !== true || moved.identity.dev !== ticket.identity.dev || moved.identity.ino !== ticket.identity.ino || publicVersion(moved).hash !== expectedCurrentHash) throw new Error('QUARANTINE_RECOVERY_UNSAFE')
+            if (!same(existingPathGuards(view.row.path), ticket.guards) || moved.existed !== true || moved.identity.dev !== ticket.identity.dev || moved.identity.ino !== ticket.identity.ino || publicVersion(moved).hash !== expectedCurrentHash) throw new Error('QUARANTINE_RECOVERY_UNSAFE')
             // link is exclusive: never overwrite a concurrently created replacement pathname.
             linkSync(quarantine, view.row.path)
             unlinkSync(quarantine)
@@ -269,7 +269,7 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
             } else if (createdIdentity) {
               const leaf = lstatSync(view.row.path)
               closeSync(fd); fd = undefined
-              if (String(leaf.ino) === createdIdentity.ino && String(leaf.dev) === createdIdentity.dev && same(pathGuards(view.row.path), ticket.guards)) unlinkSync(view.row.path)
+              if (String(leaf.ino) === createdIdentity.ino && String(leaf.dev) === createdIdentity.dev && same(existingPathGuards(view.row.path), ticket.guards)) unlinkSync(view.row.path)
             }
           } catch (repair) { failure += '; recovery failed: ' + repair.message }
         }

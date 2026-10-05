@@ -40,12 +40,17 @@ async function fixture({ policy = 'ask', verdict = 'deny', fallback = true, revi
   const toolsFiber = ctx.plugin(ToolRuntime, { mode: 'native' }); await toolsFiber.await()
   const session = ctx.get('sessions').create(`manual-${fixtures.length}`, { meta: { cwd: temp } })
   const schema = { name: 'audit_fixture', description: 'offline fixture', parameters: { type: 'object', properties: {} } }
-  session.requestHeader = () => ({ config: { provider: 'offline', model: 'fixture' }, tools: [schema] })
   session.append('turn/start', { turn: 1 }); session.append('step/start', { turn: 1, step: 1 })
   const agent = { id: session.id, session, ctx }
   const tools = ctx.get('tools')
   tools.register({ ...schema, output: { schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, render: () => [{ type: 'text', text: 'safe fixture' }] },
     async execute() { state.bodyCalls++; return { ok: true } } })
+  const writeSchema = { name: 'write', description: 'offline write fixture', parameters: { type: 'object', properties: { file_path: { type: 'string' }, content: { type: 'string' } }, required: ['file_path'], additionalProperties: false } }
+  tools.register({ ...writeSchema, output: { schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, render: () => [{ type: 'text', text: 'safe write fixture' }] },
+    async execute() { state.bodyCalls++; return { ok: true } } })
+  // 请求头必须同时声明两个工具，否则路由的 pendingActionOf 看不到 write 的 schema。
+  const requestHeader = () => ({ config: { provider: 'offline', model: 'fixture' }, tools: [schema, writeSchema] })
+  session.requestHeader = requestHeader
   const fiber = ctx.plugin(router, { enabled: true, reviewerProvider: 'offline', reviewerModel: 'fixture',
     manualFallback: fallback, manualApprovalTimeoutMs: 1000, logDecisions: false })
   await fiber.await()
@@ -53,8 +58,9 @@ async function fixture({ policy = 'ask', verdict = 'deny', fallback = true, revi
   const f = { ctx, state, session, agent, tools, fiber,
     async run(extra = {}) {
       const callId = extra.callId ?? `call-${++counter}`
-      session.append('tool/call', { turn: 1, step: 1, callId, name: schema.name, arguments: {} })
-      return tools.execute({ callId, name: schema.name, arguments: {}, agent, signal: new AbortController().signal, ...extra })
+      const args = extra.arguments ?? {}
+      session.append('tool/call', { turn: 1, step: 1, callId, name: schema.name, arguments: args })
+      return tools.execute({ callId, name: schema.name, arguments: args, agent, signal: new AbortController().signal, ...extra })
     },
     answer(callback) { return ctx.on('approval/request', async (request, next) => { state.asks++; return callback(request, next) }, { prepend: true }) },
     history: () => router.queryApprovalHistory(fiber.ctx, { sessionId: session.id, limit: 100 }),
@@ -76,7 +82,7 @@ try {
   }
   {
     const f = await fixture()
-    f.answer(request => { assert.match(request.displayReason.zh, /自动审批判断为高危操作，是否放行.*1秒未响应自动拒绝/); return 'allowed-once' })
+    f.answer(request => { assert.match(request.displayReason.zh, /自动审批判断工具「.*」为高危操作，需要你决定是否放行。1秒未响应自动拒绝/); return 'allowed-once' })
     f.tools.guard(() => 'GUARD_AFTER_MANUAL_ALLOW')
     const result = await f.run()
     assert.equal(result.isError, true); assert.equal(f.state.bodyCalls, 0); assert.equal(f.state.asks, 1)
@@ -87,6 +93,17 @@ try {
     assert.ok(value.records.some(row => row.phase === 'manual' && row.outcome === 'allowed-once' && row.approvalRequestId === asked.data.id))
     assert.ok(value.records.some(row => row.phase === 'reported-result' && row.outcome === 'reported-error'))
     console.log('PASS official manual allow + later guard deny; asked UUID linked without replacing Core')
+  }
+  // 2026-10-05 缺陷 2：人工审批提示必须带具体命令/路径，否则用户无法判断该不该批。
+  {
+    const f = await fixture({ risk: 'medium' })
+    let seen = null
+    f.answer(request => { seen = request; return 'allowed-once' })
+    await f.run({ name: 'write', arguments: { file_path: temp + '\\out.txt', content: 'x' } })
+    assert.ok(seen !== null, `人工审批请求已发出（asks=${f.state.asks} bodyCalls=${f.state.bodyCalls} prompts=${f.state.prompts.length}）`)
+    assert.ok(/file_path=/.test(seen.displayReason.zh), `displayReason 需含具体目标：${seen.displayReason.zh}`)
+    assert.ok(seen.reason.includes('file_path='), 'reason 也带具体目标')
+    console.log('PASS manual approval prompt carries the concrete command/path (缺陷 2)')
   }
   for (const options of [{ policy: 'never' }, { fallback: false }, { reviewerFailure: true }]) {
     const f = await fixture(options)
