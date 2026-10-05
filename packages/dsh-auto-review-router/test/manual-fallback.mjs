@@ -109,7 +109,32 @@ try {
     assert.ok(/放行后本次运行内不再询问/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
     assert.ok(/重启 DSH 后恢复逐次询问/.test(seen.displayReason.zh), '必须写明作用域止于重启')
     assert.ok(/敏感路径/.test(seen.displayReason.zh), '必须说明哪些情况仍会询问')
+    const { value } = await f.history()
+    const allowed = value.records.filter(row => row.phase === 'manual' && row.outcome === 'allowed-once')
+    assert.equal(allowed.length, 1)
+    assert.equal(allowed[0].cause, 'granted-directory')
+    assert.ok(allowed[0].approvalRequestId)
+    assert.ok(Number.isSafeInteger(allowed[0].sourceSeq))
     console.log('PASS manual approval prompt carries the concrete target and states the grant scope (缺陷 2 + 作用域 + MEDIUM-4)')
+  }
+  {
+    const f = await fixture({ risk: 'high' })
+    const target = join(temp, 'high-risk.txt')
+    f.answer(request => {
+      assert.match(request.displayReason.zh, /本次决定仅对这一次调用生效，不会被记住/)
+      assert.match(request.displayReason.en, /single call only/)
+      assert.ok(!request.displayReason.zh.includes('放行后本次运行内不再询问'))
+      assert.ok(!request.displayReason.en.includes('also remembers'))
+      return 'allowed-once'
+    })
+    for (let i = 0; i < 2; i++) {
+      const result = await f.run({ name: 'write', arguments: { file_path: target, content: 'x' } })
+      assert.equal(result.isError, false)
+      assert.deepEqual(router.queryGrants(f.fiber.ctx).grants, [])
+    }
+    assert.equal(f.state.asks, 2)
+    assert.equal(f.state.bodyCalls, 2)
+    console.log('PASS high-risk file approval promises one call only, stores no grant and asks again')
   }
   for (const options of [{ policy: 'never' }, { fallback: false }, { reviewerFailure: true }]) {
     const f = await fixture(options)

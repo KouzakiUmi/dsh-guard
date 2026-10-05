@@ -622,7 +622,8 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
   // 文案必须与实际授予一致。用户若不知道「放行会记住这个目录」，
   // 就在毫不知情的情况下签了一份整棵子树的授权。
   // 以下三点必须同时出现在提示里：具体命令、会记住什么、记多久。
-  const grant = grantableOutcome(exec, config, grantMemoFor(state, exec))
+  // Only medium-risk approvals can store or reuse a directory grant.
+  const grant = risk === 'medium' ? grantableOutcome(exec, config, grantMemoFor(state, exec)) : null
   const grantLine = grant === null ? {
     en: 'This decision applies to this single call only — nothing will be remembered.',
     zh: '本次决定仅对这一次调用生效，不会被记住。',

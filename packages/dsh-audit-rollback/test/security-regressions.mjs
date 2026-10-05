@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync, linkSync, readdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
-import { initState, appendEntry, capturePath, createTurnState, readAllEntries, ledgerFile, sha1Hex, existingPathGuards } from '../lib/ledger.js'
+import { initState, appendEntry, capturePath, createTurnState, readAllEntries, ledgerFile, sha1Hex, existingPathGuards, objectPath, planRollback, executePlan } from '../lib/ledger.js'
 import { createRollbackApi } from '../lib/rollback-preview.js'
 // lib/index.js 经 config.js 依赖 schemastery：必须等 bootstrap 的解析钩子评估后再动态导入。
 const { apply } = await import('../lib/index.js')
@@ -18,6 +18,46 @@ async function test(name, fn) { await fn(); count++; console.log('PASS ' + name)
 const permissive = { assertSession: async () => {} }
 
 try {
+  await test('CLI rejects corrupted snapshots during planning and immediately before execution', async () => {
+    const dir = join(root, 'cas-integrity'); mkdirSync(dir)
+    const stateDir = join(dir, 'state'), file = join(dir, 'file.txt'); initState(stateDir)
+    writeFileSync(file, 'original')
+    const turnState = createTurnState()
+    const before = capturePath(stateDir, { session: 'cas', turn: 1, path: file, phase: 'before', maxBytes: 99, turnState })
+    writeFileSync(file, 'current')
+    capturePath(stateDir, { session: 'cas', turn: 1, path: file, phase: 'after', maxBytes: 99, turnState })
+    const plan = planRollback(stateDir, 'cas', 1)
+    assert.equal(plan.actions[0].action, 'restore')
+    writeFileSync(objectPath(stateDir, before.hash), 'corrupted')
+    assert.equal(planRollback(stateDir, 'cas', 1).actions[0].action, 'skip')
+    assert.equal(planRollback(stateDir, 'cas', 1, { force: true }).actions[0].action, 'skip')
+    assert.equal(executePlan(stateDir, plan.actions)[0].action, 'skip')
+    assert.equal(readFileSync(file, 'utf8'), 'current')
+    assert.equal(existsSync(join(stateDir, 'trash')), false, 'invalid snapshot must not move the current file')
+  })
+  await test('same-turn Windows case aliases preserve the first preimage and allow GUI restore', async () => {
+    if (process.platform !== 'win32') { console.log('SKIP Windows case aliases'); return }
+    const dir = join(root, 'same-turn-case'); mkdirSync(dir)
+    const stateDir = join(dir, 'state'), file = join(dir, 'file.txt'), alias = join(dir, 'FILE.TXT'); initState(stateDir)
+    const sessionId = 'same-turn-case', turnState = createTurnState()
+    appendEntry(stateDir, { kind: 'turn/start', session: sessionId, turn: 1 })
+    writeFileSync(file, 'original')
+    capturePath(stateDir, { session: sessionId, turn: 1, path: file, phase: 'before', maxBytes: 99, turnState })
+    writeFileSync(file, 'first')
+    assert.equal(capturePath(stateDir, { session: sessionId, turn: 1, path: alias, phase: 'before', maxBytes: 99, turnState }), null)
+    writeFileSync(alias, 'second')
+    assert.equal(turnState.capturedPaths.size, 1)
+    for (const path of turnState.capturedPaths) capturePath(stateDir, { session: sessionId, turn: 1, path, phase: 'after', maxBytes: 99, turnState })
+    appendEntry(stateDir, { kind: 'turn/end', session: sessionId, turn: 1 })
+    const api = createRollbackApi(stateDir, permissive)
+    const row = (await api.changedFiles({ sessionId })).rows[0]
+    assert.equal(row.canRestore, true)
+    const preview = await api.preview({ sessionId, entryId: row.entryId })
+    const receipt = await api.restore({ sessionId, entryId: row.entryId, nonce: preview.nonce, expectedCurrentHash: preview.expectedCurrentHash })
+    assert.equal(receipt.applied, true)
+    assert.equal(readFileSync(file, 'utf8'), 'original')
+    api.dispose()
+  })
   // HIGH-1（复验半成品修复）：turn1 pre='A' / post=OVERSIZED（maxBytes=2，hash 记 null）、
   // turn2 pre=OVERSIZED / post='C'，各轮 end 齐全。旧版把连续性校验只施于展示端点，
   // canRestore=true 且 C→A 恢复成功；新版对 EVERY captured image 做全量校验，必须拒绝。

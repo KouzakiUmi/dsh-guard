@@ -329,6 +329,13 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
       } else {
         const key = `${session.id}\0${event.data.id}`, entry = approvalIds.get(key)
         if (!entry) return
+        // Router-owned requests settle after grant storage and deadline checks.
+        // Core-owned requests are still recorded directly from their event.
+        if (entry.routerManual) {
+          entry.manualSourceSeq = event.seq
+          approvalIds.delete(key)
+          return
+        }
         entry.manualReported = true
         entry.observedManualOutcome = event.data.outcome
         approvalIds.delete(key)
@@ -340,6 +347,7 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
   function invokeManual(entry, operation) {
     const session = entry?.exec.agent?.session
     if (!session) return operation()
+    entry.routerManual = true
     manualLatches.set(session, entry)
     try { return operation() } finally { manualLatches.delete(session) }
   }
@@ -351,6 +359,7 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
     entry.observedManualOutcome = outcome
     try {
       record(entry, 'manual', outcome, { ...(entry.approvalRequestId ? { approvalRequestId: entry.approvalRequestId } : {}),
+        ...(int(entry.manualSourceSeq) ? { sourceSeq: entry.manualSourceSeq } : {}),
         ...(entry.abortCause ? { cause: entry.abortCause } : {}),
         // 2026-10-05：授权记忆的成败必须在这一行落账（这是 manual 唯一的落账点）。
         // 传入优先级高于 abortCause：两者不会同时出现，但显式声明避免歧义。

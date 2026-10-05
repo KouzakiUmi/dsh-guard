@@ -138,7 +138,7 @@ export function buildReviewContext(input) {
   }
   let historyItems = []
   if (historyAvailable && Array.isArray(input.history)) {
-    historyItems = input.history.slice(-limit).map((item) => ({
+    historyItems = (limit === 0 ? [] : input.history.slice(-limit)).map((item) => ({
       role: item.role,
       content: truncateUtf8(String(item?.content ?? '')),
     }))

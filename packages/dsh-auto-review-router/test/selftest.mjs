@@ -191,6 +191,14 @@ function sampleContext(extra) {
   })
 }
 
+check('historyLimit=0 省略历史且保留待审动作', () => {
+  const text = sampleContext({ historyLimit: 0 })
+  assert(!text.includes('RECENT_HISTORY'), '零条历史不得发送历史分区')
+  assert(!text.includes('H0-OLDEST') && !text.includes('H2-NEWEST'), '零条历史不得发送旧内容')
+  assert(text.includes('PENDING-ARG-KEEP'), '待审动作必须保留')
+  assert(sampleContext({ historyLimit: 1 }).includes('H2-NEWEST'), '非零上限仍保留最新历史')
+})
+
 check('上下文组装：分区顺序正确', () => {
   const text = sampleContext()
   const titles = ['POLICY', 'ENVIRONMENT', 'PROJECT_INSTRUCTIONS', 'RECENT_HISTORY', 'PENDING_ACTION']

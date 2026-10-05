@@ -1,7 +1,7 @@
 import './runtime.mjs'
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const { ToolRuntime } = await import('@deepseek-ai/dsh-tools')
@@ -35,6 +35,22 @@ function store(name, options, extra = {}) {
 }
 const pathFor = (profile, id) => join(profile, 'dsh-auto-review-router', 'approval-history', `${createHash('sha256').update(id).digest('hex')}.jsonl`)
 try {
+  {
+    const { result: s } = store('router-manual')
+    for (const cause of ['granted-directory', 'grant-not-stored:leaf-hardlink']) {
+      const exec = execution(a, cause), entry = s.begin(exec), id = randomUUID()
+      s.invokeManual(entry, () => s.sessionEvent(a, { type: 'approval/asked', seq: 10, data: { id, toolName: exec.name, callId: exec.callId } }))
+      s.sessionEvent(a, { type: 'approval/decided', seq: 11, data: { id, outcome: 'allowed-once' } })
+      s.manualOutcome(entry, 'allowed-once', { cause })
+      s.manualOutcome(entry, 'allowed-once', { cause })
+      const rows = (await s.history({ sessionId: a.id })).value.records.filter(row => row.dispatchId === entry.base.dispatchId && row.outcome === 'allowed-once')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].cause, cause)
+      assert.equal(rows[0].sourceSeq, 11)
+      assert.equal(rows[0].approvalRequestId, id)
+    }
+    console.log('PASS router manual outcomes retain grant success/failure and SDK event identity without duplicates')
+  }
   const f = store('identities'), s = f.result
   const firstRoot = execution(a, 'same-root', 'run_code')
   a.events.push({ type: 'tool/call', seq: 2, data: { turn: 9, step: 2, callId: firstRoot.callId, name: 'run_code' } })

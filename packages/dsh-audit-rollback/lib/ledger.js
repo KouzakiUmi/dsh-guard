@@ -192,10 +192,13 @@ export function hasObject(stateDir, hash) {
   return existsSync(objectPath(stateDir, hash))
 }
 
-/** 读取 CAS 对象；缺失返回 null（调用方据此把 restore 降级为 skip）。 */
+/** Read a verified CAS object. Missing returns null; unsafe/corrupt objects throw. */
 export function readObject(stateDir, hash) {
   const file = objectPath(stateDir, hash)
-  return existsSync(file) ? readFileSync(file) : null
+  const probe = probeFile(file)
+  if (probe.existed === false) return null
+  if (probe.existed !== true || !probe.buffer || sha1Hex(probe.buffer) !== hash) throw new Error('CAS_MISSING_OR_CORRUPT')
+  return probe.buffer
 }
 
 /**
@@ -392,7 +395,8 @@ export function probeFile(absPath, maxBytes = Number.MAX_SAFE_INTEGER) {
  */
 export function capturePath(stateDir, options) {
   const { session, turn, path: absPath, phase, maxBytes, turnState } = options
-  if (phase === 'before' && turnState !== undefined && turnState.beforeSeen.has(absPath)) return null
+  const pathKey = canonicalPathKey(absPath)
+  if (phase === 'before' && turnState !== undefined && turnState.beforeSeen.has(pathKey)) return null
   const probe = probeFile(absPath, maxBytes)
   if (probe.existed === null) {
     // 读失败（非 ENOENT，契约 F4 修正）：不得记 existed:false、不写这条 capture；
@@ -427,8 +431,8 @@ export function capturePath(stateDir, options) {
     existed: probe.existed,
   })
   // 写入成功才标记 beforeSeen（契约第 4 节：同轮同路径 before 只记第一条）
-  if (phase === 'before' && turnState !== undefined) turnState.beforeSeen.add(absPath)
-  if (turnState !== undefined) turnState.capturedPaths.add(absPath)
+  if (phase === 'before' && turnState !== undefined) turnState.beforeSeen.add(pathKey)
+  if (turnState !== undefined && ![...turnState.capturedPaths].some(path => canonicalPathKey(path) === pathKey)) turnState.capturedPaths.add(absPath)
   if (oversized) {
     appendEntry(stateDir, {
       kind: 'note',
@@ -504,7 +508,7 @@ export function matchesReference(probe, ref) {
  *   轮次另有 capture 也视为不一致（turnReferences 统一口径）；
  * - 一致 → restore（before.existed:true）或 trash（existed:false）；
  * - 不一致 → skip「轮后已被改动」（force 时改为正常执行）；
- * - restore 但 CAS 对象缺失 → skip「对象缺失」（计划阶段即判定，执行前先校验）。
+ * - restore 但 CAS 对象缺失/损坏 → skip（计划及执行前均验证对象）。
  *
  * @returns {{ session: string, turn: number, actions: Array<object> }}
  *   actions 元素：{ path, action: 'restore'|'trash'|'skip', from, reason? }
@@ -551,10 +555,14 @@ export function planRollback(stateDir, sessionId, turn, options = {}) {
       continue
     }
     if (before.existed) {
-      if (before.hash === null || !hasObject(stateDir, before.hash)) {
-        actions.push({ path, action: 'skip', from: before.hash ?? null, reason: '对象缺失' })
-      } else {
-        actions.push({ path, action: 'restore', from: before.hash })
+      try {
+        if (before.hash === null || readObject(stateDir, before.hash) === null) {
+          actions.push({ path, action: 'skip', from: before.hash ?? null, reason: '对象缺失' })
+        } else {
+          actions.push({ path, action: 'restore', from: before.hash })
+        }
+      } catch {
+        actions.push({ path, action: 'skip', from: before.hash ?? null, reason: '对象损坏或无法读取' })
       }
     } else {
       // before 时文件不存在 → 回滚 = 把新建的文件收进回收站

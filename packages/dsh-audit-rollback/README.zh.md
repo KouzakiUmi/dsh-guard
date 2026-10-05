@@ -1,133 +1,117 @@
 # dsh-audit-rollback
 
-持久化审计账本 + 可精确回滚的编辑前内容。DSH 0.2.1-alpha.1 自带的 `dsh-workspace-changes` 只把每轮改动留在内存里、重启即失，且全安装树没有 revert/undo 入口；本插件补上持久层：文件工具动手前把目标路径的编辑前字节存进内容寻址对象库（CAS），并按轮次写 JSONL 审计账本。回滚由独立 CLI 离线完成，不占模型上下文。
+为 DeepSeek Harness 文件工具提供持久审计和文件恢复。包版本 `0.3.2`，验证基线 DSH `0.2.1-alpha.1`。安装方式见 [仓库 README](../../README.md#安装)。
 
-## 能力
+## 功能
 
-- **编辑前捕获**：`write` / `edit` / `str_replace_editor`（可配）调用前捕获目标文件原始字节进 CAS（SHA-1 寻址，同内容只存一份）。
-- **逐轮审计账本**：`turn/start`、`call`（工具名 + 参数哈希 + 截断预览）、`capture/before|after`、`turn/end`、`rollback`、`note` 六类条目，按 UTC 日期分文件，append-only。权威 `after` 只在 `turn/end` 采集；`agent/turn-stopping` 不写 after——stopping 之后核心仍可继续落盘，提前采集会把后像记成中间态；没有 `turn/end` 的轮次恢复侧一律以 `TURN_NOT_ENDED` 拒绝（fail-closed）。
-- **CLI 回滚**：独立 CLI 按会话 + 轮次回滚——已存在的文件从 CAS 恢复、新建的文件收进回收站；轮后被改动过的文件默认 skip，`--force` 才覆盖；dry-run 为默认，`--apply` 才真正动手。
-- **会话内文件恢复（开发树实现）**：会话「已修改文件」视图列出摘要，逐项打开预览并二次确认；只有完整前后捕获、轮次已结束、当前哈希/对象、会话与路径身份均匹配且确认票据未过期时才可恢复。预览 nonce 有效期 120 秒，恢复请求不接受任意 path/force。三个方法调用前都经 Host `sessionController.inspect` 只读核实会话存在（不激活、不 resume Agent/模型），restore 另要求该会话无进行中的轮（`agents` 状态非 running）；session/agents 服务缺失或读取失败一律按 `SESSION_VERIFIER_UNAVAILABLE` 拒绝，不静默放行。Windows 上同一文件的大小写别名路径（如 `target.txt` / `TARGET.TXT`）按小写键归并判定，任一别名被其它会话或更晚轮次捕获即拒绝恢复。该功能未宣称已发布或通过真实 GUI 验收。
-- **可编辑设置页**：零构建手写 client，唯一入口 `settings.plugins.tab`（设置→内置插件）；支持编辑、保存、取消并重新读取、字段校验、保存结果与 revision 冲突提示。配置持久化只使用官方 Settings/ConfigEditor；存储层和 CLI 仍只用 Node 内建模块。
-- **官方 Config schema**：Host 依赖 peer `@deepseek-ai/schemastery ~3.18.5-alpha.1`，五个可编辑字段声明 `.volatile()`，运行时读取 `.get()`。
+- 在文件工具调用前保存本轮首次前像，在 `turn/end` 保存最终后像。
+- 使用 SHA-1 内容寻址保存原始字节，同内容复用对象。
+- 按 UTC 日期追加 JSONL 账本，记录轮次、调用目标、捕获及回滚。
+- 会话「已修改文件」页签提供差异预览、二次确认和单文件恢复。
+- 独立 CLI 按会话及轮次生成计划或执行回滚。
+- 「设置 → 内置插件 → 审计与回滚」提供捕获策略及状态。
 
-## 限制（明确不做）
+Windows 大小写别名按统一键去重，保留本轮首次前像和首次路径写法。调用参数预览只保存参数键名，不保存参数值；文件快照仍包含原始文件内容。
 
-- **不做**实时 UI 内撤销按钮；回滚只走 CLI。
-- **GUI 不提供无确认撤销**：文件视图只显示变化摘要与差异预览，恢复操作必须另行确认；设置页不是回滚入口。
-- **不捕获** shell / 命令行 / 其它插件 / 人工编辑造成的文件改动——只覆盖文件工具（`write` / `edit` / `str_replace_editor`）在 `arguments` 里显式给出的路径；轮后被插件外手段改动的文件会因哈希/身份或后续捕获检查而拒绝恢复。
-- 文件视图的 diff 是首个前像到当前内容的对比，不保证等于完整会话 netdiff；捕获仅说明观察到工具目标，不证明工具 body 实际执行或成功。仅有旧版 pre-image 的记录不能安全恢复。纯 Node 路径检查无法消除恶意并发路径交换的全部 TOCTOU 风险，不能宣传为针对恶意同机写入者的安全边界。
-- **不做**影子 git 快照：`gitSnapshot` 不进入可编辑表单，不提供样子开关；旧 profile 的 `true` 保留告警和 note 兼容行为，不代表实现了 git 快照。
-- **不保证**目录结构变化的回滚（只跟踪文件路径）；删除整目录等操作不在捕获范围。
-- 目录当时不存在时的捕获（新建目录下的文件）现可回滚；但**文件跨轮创建后再被编辑**（turn1 新建、turn2/turn3 继续改）一律标 `CREATED_IN_EARLIER_TURN`、不可回滚 —— 撤回创建会连带删掉后续轮次的工作。判据看「首个前像声称文件原本不存在」且与末个后像不在同一轮，**与祖先链是否完整无关**（在已存在目录里新建文件同样受此约束）。
-- **不捕获**识别不出目标路径的工具调用（`call` 条目照记，`targets` 为空）。
-- 超限文件（默认 >2 MiB）只记元数据不存内容，回滚时该路径 skip「对象缺失」。
-- 读取失败（权限/被占用/目标是目录等，非「文件不存在」）的路径**不记 capture**，只 warn——不会把读不出来的路径误记成 `existed:false` 而回滚时误收进 trash。
-- **excludeGlobs 的已知漏排除**（默认四条仍有效，但匹配不是文件系统语义）：模式区分大小写，且无通配符时是子串。`/.git/`、`/node_modules/` 两侧都有斜杠，所以目录本身 `D:\proj\.git`、`D:\proj\node_modules`（末尾不再跟分隔符）不会被排除；Windows 上 `.GIT`、`Node_Modules` 也不会命中。若自行写成没有斜杠的 `.git`，子串会误伤 `.gitignore`、`.gitattributes`、`.github`。默认四条带了斜杠，不会误伤这些文件。
+## 会话内恢复
 
-## 安装与生效边界
+打开「已修改文件」页签，查看差异并选择恢复。确认页显示路径、当前版本和恢复动作；票据有效期 120 秒，文件变化、冲突或过期后需重新预览。
 
-离线测试不代表真实 GUI 生效。部署须经授权，通过目标 profile 的官方插件管理入口；desktop 使用 GUI 或当前安装树已核实支持的官方 `desktop-cli.js`，不能用普通核心 CLI 自行绕过桌面限制。不要手工链接包进 profile、不在真实 profile 直接运行包管理器、不手改其依赖 manifest。重启另需授权。
+GUI 恢复要求：
 
-工作区代码更新不等于已安装副本更新。部署后需核验 Host Config schema、官方 settings namespace、client ModuleLoader 与 `settings.plugins.tab` 唯一入口；首次引入 schema/client 需要消费实例加载新版本。后续 volatile 表单保存不用重启，且仅对新轮次生效；普通 stateDir 迁移不能用此表单热改。
+1. Host 能验证会话存在，恢复时没有运行中的轮次。
+2. 相关轮次结束，每轮前后像完整，跨轮捕获连续。
+3. 快照、当前内容与路径身份校验通过。
+4. 没有后续或其他会话捕获使该恢复失效。
 
-`cordis.patch.yml` 默认配置保守：不显式设 `stateDir`（回落 `$DSH_HOME/audit-rollback` → `~/.dsh/audit-rollback`）、`gitSnapshot:false`、默认排除 `node_modules` / `.git` / `.dsh-memory` / `.graphflow-cache` 四类目录。
+恢复已有文件前备份当前内容；撤回创建时备份后移除文件。每次恢复尝试消费一次票据。差异是首个捕获前像与当前文件的对比，不保证等于完整会话净改动。旧账本仅有前像时只能查看。跨轮创建后又编辑的文件，GUI 拒绝会话级撤回创建，以保护后续工作。
 
-## CLI 用法
+## CLI
 
-```powershell
-node scripts/audit-rollback.mjs list     [--state <dir>] [--session <sid>] [--turn <n>] [--limit N] [--json]
+从本包目录执行，或使用包提供的 `audit-rollback` 可执行入口：
+
+```sh
+node scripts/audit-rollback.mjs list [--state <dir>] [--session <sid>] [--turn <n>] [--limit N] [--json]
 node scripts/audit-rollback.mjs sessions [--state <dir>] [--json]
-node scripts/audit-rollback.mjs show     <sessionId> <turn> [--state <dir>] [--json]
-node scripts/audit-rollback.mjs undo     <sessionId> <turn> [--state <dir>] [--apply] [--force]
-node scripts/audit-rollback.mjs last     [--state <dir>] [--apply] [--force] [--json]
+node scripts/audit-rollback.mjs show <sessionId> <turn> [--state <dir>] [--json]
+node scripts/audit-rollback.mjs undo <sessionId> <turn> [--state <dir>] [--apply] [--force] [--json]
+node scripts/audit-rollback.mjs last [--state <dir>] [--apply] [--force] [--json]
 ```
 
-- 默认 dry-run：只打印将执行的动作，**不触碰任何目标文件**；按契约仍追加一条 `rollback` 计划条目（`applied:false`），作为审计痕迹。
-- 退出码：`0` 全部完成；`1` 参数错误或状态不可读；`2` 有文件被 skip（部分完成）；`3` 该轮没有可回滚的捕获。
-- 可把 `scripts/audit-rollback.mjs` 加进 PATH 或用 `npm link` 后直接用 `audit-rollback` 命令。
+默认仅生成计划，不修改目标文件，但追加 `applied:false` 的回滚账本条目。`--apply` 执行计划：已有文件恢复该轮首次前像，新建文件移入回收站。
 
-## 数据布局
+当前版本与该轮后像不一致，或路径存在后续捕获时，默认跳过。无后像时 CLI 使用该轮前像作为参照，与 GUI 的完整前后像要求不同。参照无哈希时仅比较字节数。
 
-```
-<stateDir>/                     # 解析：config.stateDir → $DSH_HOME/audit-rollback → ~/.dsh/audit-rollback
-  state.json                    # {"version":1,"createdAt":...}，只创建一次
-  ledger/YYYY-MM-DD.jsonl       # UTC 日期分文件，append-only
-  objects/<sha1前2位>/<sha1>    # CAS，原始字节，写入幂等，永不删除
-  trash/<ISO时间戳去冒号>/<卷标识>/...    # 回滚时被移走的当前内容；Windows 卷标识=盘符字母（D:/a/b.txt → D/a/b.txt），UNC 归 UNC/<主机>/<共享>/…，POSIX 去根斜杠；目标重名追加 -1/-2 序号，绝不覆盖已有备份
-```
+`--force` 允许覆盖上述版本冲突，仅应在确认要丢弃轮后修改时使用；不能绕过缺失、损坏或不可读取的快照。CLI 在计划和执行恢复前均校验快照内容哈希，失败则跳过并保留当前文件。
 
-## objects 清理
+CLI 是离线入口，不查询 Host 当前运行状态；执行前应停止相关文件的写入活动。
 
-`objects/` **只增不减**。插件和 CLI 都不会自动删除里面的对象，也不会在回滚成功后回收它们。磁盘变大时只能人工清理，而且删了就真的回不去：
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 所有动作完成；未指定 `--apply` 时表示计划生成完成 |
+| `1` | 参数错误、状态不可读或命令失败 |
+| `2` | 至少一个文件被跳过 |
+| `3` | 没有可回滚捕获 |
 
-- 可以删除整个 `<stateDir>/objects/`，或其中某个 `<sha1 前 2 位>/` 子目录。不要只删散落的单个文件却留着半截目录——整段删掉更不容易漏。
-- 账本行**不会**跟着改。已记下的 `capture.hash` 还在，但对应字节没了。之后对这些路径执行 `undo`，会在动手前降级为 `skip`，原因是「对象缺失」，**不会**把工作副本恢复成编辑前内容。
-- 因此不要把清理理解成「腾出空间、回滚照旧」。还需要回滚的轮次，就不要删它引用的对象。
-- 建议只在确认这些历史轮次不再回滚、或磁盘告急且 `stateDir` 已另有完整备份时清理。清理前先把整个 `stateDir` 拷走；拷贝本身不是回滚，只是让你还能把对象放回去。
+## 配置
 
-## 配置字段
+通过官方 Settings / ConfigEditor 保存到当前 profile。五个可编辑字段仅对新轮次生效，进行中轮次保持开始时的配置快照。
 
-默认值见契约 §2.1；下表与其 yaml 逐字段一致，且按契约 §2.1 第 2 条要求，插件代码内部默认值与 `cordis.patch.yml` 默认值也逐字段一致。
-
-| 字段 | 默认 | 说明 |
+| 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `stateDir` | （回落见上） | 普通配置，设置页只读；状态目录支持 `~` 展开 |
-| `captureTools` | `['write','edit','str_replace_editor']` | 要捕获编辑前内容的工具名 |
-| `captureMaxBytes` | `2097152`（2 MiB） | 单文件捕获上限；超限记 `hash:null` + `note` |
-| `argsMaxBytes` | `4096` | `call` 条目 `argsPreview` 截断上限（UTF-8 字节） |
-| `logCalls` | `true` | 是否记录 `call` 条目 |
-| `excludeGlobs` | `['/node_modules/','/.git/','/.dsh-memory/','/.graphflow-cache/']` | 命中即不捕获：含通配符按 glob（`*` / `**` / `?`）对绝对路径全串匹配；不含通配符按路径片段（子串）匹配，默认排除依赖目录、版本库、记忆目录与缓存目录 |
-| `gitSnapshot` | `false` | 未实现，不可设置；仅兼容旧 profile 字段 |
+| `captureTools` | `write`, `edit`, `str_replace_editor` | 捕获工具名，至少一项 |
+| `captureMaxBytes` | `2097152` | 单文件捕获上限，正安全整数，字节 |
+| `argsMaxBytes` | `4096` | 参数键名预览上限，正安全整数，字节 |
+| `logCalls` | `true` | 是否记录工具调用 |
+| `excludeGlobs` | `/node_modules/`, `/.git/`, `/.dsh-memory/`, `/.graphflow-cache/` | 排除规则，可清空 |
 
-兼容范围：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0`。前半覆盖 `0.2.0` 的 rc 预发布；后半用带预发布标签的 `0.2.1-0` 放行 `0.2.1` 起、`0.3.0` 前的预发布（含本机 `0.2.1-alpha.1`）。只写前半段时，node-semver 匹配不到 `0.2.1-alpha.1`。
+`stateDir` 是普通配置，设置页只读，不支持热迁移。解析顺序：配置值（支持 `~` 展开）、`$DSH_HOME/audit-rollback`、`~/.dsh/audit-rollback`。迁移前停止轮次、备份数据，再通过宿主配置流程重新加载。
 
-设置页统一位于「设置 → 内置插件 → 审计与回滚」（唯一 `settings.plugins.tab` 入口），不再贡献设置侧栏的独立页面。需启用官方内置插件设置容器；容器晚声明时等待，不注册另一处回退入口。保留 Host 只读状态、账本、对象库、最近捕获和最新配置回显；编辑使用官方 `remote.settings.describe()` 读取 `audit-rollback` namespace 和 revision，`update(ns, patch, revision)` 保存五个 volatile 字段。
+`gitSnapshot` 默认 `false`，未实现，不提供编辑开关；旧配置启用时仅告警及记录说明。
 
-保存成功表示官方 ConfigEditor 已验证、持久化并通过 Loader reconciliation；**新轮次**使用最新配置，**进行中轮次**保持 turn/start 时的完整快照，before/after 使用相同 stateDir 与捕获上限。仅参数预览/call 且没有活动轮次时读取当前配置。`stateDir` 属普通配置，在设置页明确只读：不支持安全热迁移，需停轮、备份数据并通过官方配置维护流程重加载。`gitSnapshot` 未实现且不可设置。
+排除规则统一分隔符后区分大小写匹配。含通配符时 `*` 不跨目录、`**` 跨目录、`?` 匹配单字符；无通配符时按子串匹配。不支持 brace 扩展。默认 `/.git/` 等规则不匹配无尾分隔符的目录自身或 `.GIT` 等大小写变体。
 
-字段校验：两个上限为正安全整数；captureTools 至少一项；列表每行一项、空行忽略；excludeGlobs 可清空。保存失败保留草稿并显示错误；过期 revision 不覆盖并发修改，提示取消并重新读取，重新编辑后保存。官方 settings 服务缺失或配置不可写时明确报错，原状态查看仍可使用；不创建独立设置文件，不自行编辑真实 profile。
+过期 revision 写入被拒绝，草稿保留；取消并重新读取后再编辑。Settings 不可用或配置不可写时显示错误。
 
-`excludeGlobs` 子串语义的边界（契约 §2.1 第 3 条）：不含通配符的模式是**区分大小写**的子串匹配——默认四项都带斜杠（`/.git/`），因此只命中路径中间的目录片段，**不会**命中目录本身不带尾斜杠的写法（如 `D:/proj/.git` 本身），也不会命中 `.GIT`（大小写不同）；反过来，若手写一个不带斜杠的模式（如 `.git`），会误伤 `.gitignore` 这类文件名——自定义时建议沿用带斜杠的写法。
+## 数据存储
+
+```text
+<stateDir>/
+  state.json
+  ledger/YYYY-MM-DD.jsonl
+  objects/<sha1前两位>/<sha1>
+  trash/
+```
+
+账本只追加，对象库只增不减，没有自动清理。CLI 备份按时间与原路径保存，GUI 备份按操作 ID 保存并记录原文件存在性。
+
+删除对象不会移除账本引用，但关联历史无法恢复。清理前备份整个状态目录并确认不再需要相关历史。快照及备份包含原始文件内容，需按其保密要求管理。
+
+## 限制
+
+- 仅捕获配置内文件工具的显式目标路径，不覆盖 shell、其他插件、人工编辑和无法识别目标的调用。
+- 不恢复完整目录结构，不提供工作区事务或整轮原子回滚。
+- 超限文件仅记录元数据，没有快照时无法恢复。GUI 恢复上限固定为 2 MiB。
+- 非“文件不存在”的读取错误不被当作创建前像；捕获失败仅告警，不改变工具结果。
+- 捕获不证明工具执行或成功。纯 Node 路径检查不能提供针对恶意同机并发写入者的完整安全边界。
+
+## 验证
+
+从仓库根目录执行：
+
+```sh
+node tools/verify.mjs --pkg dsh-audit-rollback --quiet
+node scripts/check-manifest.mjs
+```
+
+测试覆盖存储、捕获、CLI、GUI 数据接口、设置保存、损坏快照和 Windows 别名。使用临时目录；客户端 VM 测试不替代实机验收。
 
 ## 未核实项
 
-以下用法在本阶段未逐项对 DSH 内核做实证核实，按契约实现并在此声明：
+- 目标安装版本的 GUI 显示、点击与更新后加载效果。
+- 非验证基线核心版本、第三方工具参数及真实权限组合。
+- 崩溃、断电及恶意并发路径交换下的完整恢复保证。符号链接测试受权限限制时可能跳过，跳过不代表覆盖。
 
-1. **`exec.arguments` 的真实键集合**：目标路径按 `path` / `file_path` / `filePath` / `filename` 顺序探测，取自契约第 5.4 节；`write`/`edit` 在本机内核中的真实参数键尚未逐工具实证，识别不出时只记 `call`（`targets:[]`）不捕获——属于显式降级，不会误捕。
-2. **dry-run 仍追加 `rollback` 计划条目**：契约第 7 节既要求「写一条 rollback 条目（applied 反映是否真的执行）」又要求 dry-run「不碰文件系统」。实现取「不触碰**目标文件**，但账本追加 `applied:false` 的计划条目」这一解释，保留审计痕迹。
-3. **（已裁决，不再属于未核实项）`captureMaxBytes` 默认值与默认排除目录**：默认值见契约 §2.1（`captureMaxBytes: 2097152` 即 2 MiB、`excludeGlobs` 四项）；`cordis.patch.yml` 与插件代码内部默认值已按契约 §2.1 第 2 条要求逐字段对齐。
-4. **`excludeGlobs` 匹配语义**（契约 §2.1 第 3 条写定）：手写实现，含通配符时支持 `*`（不跨分隔符）/ `**`（跨分隔符）/ `?`，对统一为正斜杠的绝对路径全串匹配；**不含通配符的模式按路径片段（子串）匹配**（`/node_modules/` 这类默认排除项依赖此语义生效）；brace 扩展等复杂语义不支持。
-5. **一致性判定的参照**（契约第 7 节，2026-10-04 修正）：参照 = 该轮的 `after`（该轮没有 `after` 才退到该轮 `before`）；该路径在后续轮次另有捕获也视为不一致（skip「轮后已被改动」），只有 `--force` 才执行；`show` 与 `undo` 共用同一判定函数，两处结论一致。参照条目无哈希（超限捕获）时退化为比字节数。
-6. **CLI 扩展**：`undo` 子命令额外接受 `--json`（契约只给 `last` 列了 `--json`），属超集扩展，不改变既定退出码语义。
-7. **部署未执行**：本次仅工作区开发与隔离测试；真实 GUI 的渲染、点击和已安装副本更新未验证，不从离线通过推断当前页面已更新。
-8. **回滚安全边界（2026-10-05 复核声明）**：纯 JS 路径校验无法消除恶意并发 TOCTOU 风险。Windows Node 24 的 `constants.O_NOFOLLOW` 为 undefined，没有 OS 级 no-follow 保护，防重入只靠 fd 身份比对与 nlink 检查。symlink 创建在本机 Windows 测试环境 EPERM，文件 symlink 用例只能 SKIP（junction/hardlink 用例已真跑）。备份与 intent 目前只对目标文件 fsync，崩溃/断电/DACL 场景下的恢复完整性未验证。
+## 许可证
 
-## 自测
-
-```powershell
-node test/selftest.mjs
-node test/plugin-smoke.mjs
-node test/status.mjs
-node test/navigation.mjs
-node test/settings-client.mjs
-node test/settings-integration.mjs
-node test/rollback-integration.mjs
-node test/rollback-preview.mjs
-node test/rollback-ui.mjs
-node test/security-regressions.mjs
-```
-
-`tools/verify.mjs` 自动枚举此目录下的测试 `.mjs`；`bootstrap.mjs` 是辅助加载器，不作为测试运行。`package.json` 的 `scripts.test` 显式列出上述 10 项。发布运行清单仅含 package manifest、README、patch、`lib/index.js`、`lib/client.js`、`lib/config.js`、`lib/ledger.js`、`lib/rollback-preview.js`、`lib/rollback-remote.js` 与 `scripts/audit-rollback.mjs`；测试文件不随包发布。
-
-测试数据写在包内测试临时目录或系统 mkdtemp，并在 finally 清理，不写真实 `~/.dsh`。集成测试验证原 fiber 不卸载、官方持久化与失败不写入、实时配置改变下一轮实际捕获，以及旧轮次 before/after 固定快照。client 交互是 VM hook/元素测试，不等同真实浏览器可视验收。
-
-`test/bootstrap.mjs` 只用于测试解析：优先正常 workspace peer，缺依赖时只读 `DSH_APP_ROOT` 指定的安装根；Windows 可回落本次已核验的 DSH NEXT 路径，保留 ESM export conditions。不安装、不写链接、不改安装树。schema/基础测试缺 peer 将报错；只有官方组合依赖缺失时集成测试显式 SKIP，CI 应配置依赖并要求执行，不能把 SKIP 当完整验收。
-
-## API 依据（现场 0.2.1-alpha.1）
-
-- 官方 [Settings 子系统文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/settings.md)：Config volatile 表单、revision 读写与冲突；在线 main 可能前进，实际契约以本次安装代码复核。
-- 现场 `@deepseek-ai/dsh-settings/lib/index.js`：`volatileForm` 只投影 volatile 字段；`describe` 提供 revision；`update(ns, patch, expectedRevision)` 在 ConfigEditor 的锁内拒绝 `SETTINGS_CONFLICT`；普通配置路径不可写。
-- 现场 `@deepseek-ai/dsh-api-settings-controller/lib/index.js`：`remote.settings.describe/update`、revision 第三参数、错误分类 `settings/conflict` / `settings/rejected`。
-- 现场 `@deepseek-ai/dsh-config-editor/lib/index.js`：官方 profile patch 文件锁、schema 验证、原子持久化、Loader reconciliation 与失败恢复；插件不复制这些逻辑、不自行写 profile。
-- 现场 `@deepseek-ai/schemastery 3.18.5-alpha.1` / Cordis Loader：`.volatile()` 产出 `.get()` 引用，volatile-only 更新不卸载 fiber。真实组合测试已验证本包使用方式。
+MIT
