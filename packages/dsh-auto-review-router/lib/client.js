@@ -716,6 +716,10 @@ window.__ModuleLoader__.load({
             // Host 业务错误码（HISTORY_ERRORS，由 Host 结果携带）原样透传；RPC 挂载失败、
             // 服务缺失、超时、解析失败等无 code 错误一律归类为 service-unavailable，
             // 不得误标为账本读取失败（history-unavailable）。
+            // service-unavailable 是个兜底桶，会把「远端没挂载」「方法没路由」
+            // 「响应形状不合法」「本地解析抛错」四种完全不同的问题压成同一句话。
+            // 这里保留原始错误到 console，便于直接定位，不必再靠猜。
+            console.error('[dsh-auto-review-router] 审批历史读取失败:', error)
             if (current()) emit({ ...state, status: 'error', error: HISTORY_ERRORS.has(error?.code) ? error.code : 'service-unavailable' })
           } finally { if (current()) { controller = undefined; schedule() } }
         }
@@ -878,8 +882,10 @@ window.__ModuleLoader__.load({
         mounted = ctx.remote.$mount(statusRemote)
         if (typeof ctx.effect === 'function') ctx.effect(async () => await mounted, 'dsh-auto-review-router: mount remotes')
       } catch (error) {
+        // 挂载失败此前被 catch(() => {}) 完全吞掉：remote 拿不到时，调用方只会
+        // 轮询 20 秒后收到「挂载超时」，真正的失败原因无从查起。保留它。
         mounted = Promise.reject(error)
-        mounted.catch(() => {})
+        mounted.catch((reason) => { console.error('[dsh-auto-review-router] remote 挂载失败:', reason) })
       }
       if (typeof ctx.effect === 'function') {
         ctx.effect(() => () => { disposed = true }, 'dsh-auto-review-router: dispose client')
