@@ -13,10 +13,15 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.
 // 授权记忆的可授权性判定要求目录链可信且非敏感根；os.tmpdir() 落在
 // %LOCALAPPDATA% 下会被判为 AppData 敏感段，因此测试目录放在 D 盘根下。
 const root = mkdtempSync('D:\\dsh-selftest-')
-// profileContext.dir 决定授权记忆是否可用（index.js 据此创建 store）。
-// 缺了它 → NOOP_GRANTS → preview() 恒为 store-unavailable → 文案只会说
-// 「仅对本次生效」。两条 HIGH-4 用例分别需要「有 store」与「无 store」。
+// 授权记忆改为本次运行内有效（纯内存）后不再需要 profileContext 才能工作；
+// 这里保留一个临时目录供需要 profile 的用例使用。
 const profileDir = mkdtempSync('D:\\dsh-selftest-profile-')
+// 任何退出路径（含未捕获异常）都要清理，否则失败一次就在 D 盘根留两个目录。
+process.on('exit', () => {
+  for (const p of [root, profileDir]) {
+    try { rmSync(p, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+  }
+})
 
 let failed = 0
 
