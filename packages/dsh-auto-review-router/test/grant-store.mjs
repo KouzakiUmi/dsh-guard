@@ -188,13 +188,19 @@ try {
   {
     const s = store('evidence')
     const p = file(join(dir('evidence'), 'a.txt'))
-    // 记忆必须能追溯到一次真实的人工放行：tool 与审批请求 id 缺一不可。
-    for (const bad of [{}, { tool: 'edit' }, { approvalRequestId: 'r' }, { tool: '', approvalRequestId: 'r' },
-      { tool: 'edit', approvalRequestId: '' }, null]) {
+    // 契约：`tool` 必填（记忆必须能追溯到一次真实的人工放行）；
+    // `approvalRequestId` 可选 —— 它由 SDK 的 approval/asked 事件异步带入，
+    // 拿不到时不应阻断记忆，只在有值时记下来供审计关联。
+    for (const bad of [{}, { approvalRequestId: 'r' }, { tool: '', approvalRequestId: 'r' },
+      { tool: 42, approvalRequestId: 'r' }, null, 'edit']) {
       assert.equal(s.remember(p, 'edit', bad).ok, false, `证据不全：${JSON.stringify(bad)}`)
     }
     assert.equal(s.check(p, 'edit').hit, false, '证据不全不得产生授权')
-    ok('证据不全一律不记忆')
+    // 无 approvalRequestId 时必须照样写入，且字段落成 null 而不是 undefined
+    assert.equal(s.remember(p, 'edit', { tool: 'edit' }).ok, true, '缺 approvalRequestId 不应阻断记忆')
+    assert.equal(s.check(p, 'edit').hit, true)
+    assert.equal(s.list()[0].approvalRequestId, null, '缺 id 时应落 null')
+    ok('证据契约：tool 必填、approvalRequestId 可选')
   }
 
   // ── 内存作用域：clear 立刻生效，且不跨实例泄漏 ───────────────────

@@ -105,10 +105,11 @@ try {
     assert.ok(seen !== null, `人工审批请求已发出（asks=${f.state.asks} bodyCalls=${f.state.bodyCalls} prompts=${f.state.prompts.length}）`)
     assert.ok(/file_path=/.test(seen.displayReason.zh), `displayReason 需含具体目标：${seen.displayReason.zh}`)
     assert.ok(!/file_path=/.test(String(seen.reason)), `reason 不得含命令正文：${seen.reason}`)
-    // HIGH-4：可授权的调用必须声明会记住目录与期限
-    assert.ok(/放行后将同时授予一项长期授权/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
-    assert.ok(/30 天/.test(seen.displayReason.zh) && /100 次/.test(seen.displayReason.zh), '必须写明期限与次数')
-    console.log('PASS manual approval prompt carries the concrete target and states the grant scope (缺陷 2 + HIGH-4 + MEDIUM-4)')
+    // 可授权的调用必须声明会记住目录与作用域（作用域是本次运行，不是长期）
+    assert.ok(/放行后本次运行内不再询问/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
+    assert.ok(/重启 DSH 后恢复逐次询问/.test(seen.displayReason.zh), '必须写明作用域止于重启')
+    assert.ok(/敏感路径/.test(seen.displayReason.zh), '必须说明哪些情况仍会询问')
+    console.log('PASS manual approval prompt carries the concrete target and states the grant scope (缺陷 2 + 作用域 + MEDIUM-4)')
   }
   for (const options of [{ policy: 'never' }, { fallback: false }, { reviewerFailure: true }]) {
     const f = await fixture(options)
