@@ -335,5 +335,57 @@ try {
     assert.equal(readFileSync(file, 'utf8'), 'v2-edited-important', '文件内容未被触碰')
   })
 
+  // 端到端：同轮修改一条真实链路 —— 捕获 → 列出 → 预览出票据 → 确认恢复 →
+  // 票据被消费 → 重放票据失败 → 恢复后内容正确且当前版本进了回收站。
+  // 前面的场景都是单点反例；这里按用户真实操作顺序串一遍。
+  await test('E2E same-turn edit: list → preview → restore → ticket single-use', async () => {
+    const dir = join(root, 'e2e'); mkdirSync(dir)
+    const stateDir = join(dir, 'state'); initState(stateDir)
+    const sessionId = 'e2e-session'
+    const file = join(dir, 'work.txt')
+    writeFileSync(file, 'v1-ORIGINAL\n')
+
+    appendEntry(stateDir, { kind: 'turn/start', session: sessionId, turn: 1, cwd: dir })
+    const ts = createTurnState()
+    appendEntry(stateDir, { kind: 'call', session: sessionId, turn: 1, tool: 'edit', callId: 'c1', targets: [file] })
+    capturePath(stateDir, { session: sessionId, turn: 1, path: file, phase: 'before', tool: 'edit', callId: 'c1', maxBytes: 65536, turnState: ts })
+    writeFileSync(file, 'v2-EDITED\n')
+    capturePath(stateDir, { session: sessionId, turn: 1, path: file, phase: 'after', maxBytes: 65536, turnState: ts })
+    appendEntry(stateDir, { kind: 'turn/end', session: sessionId, turn: 1, captured: 1 })
+
+    const api = createRollbackApi(stateDir, permissive)
+
+    // 1. 列出
+    const { rows } = await api.changedFiles({ sessionId })
+    const row = rows.find(r => r.path === file)
+    assert.ok(row, '该文件必须出现在列表里')
+    assert.equal(row.canRestore, true, `同轮修改应可回滚（reason=${row.reason}）`)
+    assert.equal(row.changeType, 'modified')
+
+    // 2. 预览出票据
+    const view = await api.preview({ sessionId, entryId: row.entryId })
+    assert.ok(typeof view.nonce === 'string' && view.nonce.length > 0, '可回滚必须签发票据')
+    assert.equal(view.canRestore, true)
+    assert.ok(view.diff, '预览必须带 diff')
+
+    // 3. 确认恢复
+    const receipt = await api.restore({ sessionId, entryId: row.entryId, nonce: view.nonce, expectedCurrentHash: view.expectedCurrentHash })
+    assert.equal(receipt.applied, true, '恢复必须成功')
+    assert.equal(readFileSync(file, 'utf8'), 'v1-ORIGINAL\n', '文件必须恢复为首个捕获前像')
+
+    // 4. 票据一次性：重放必须失败，且不得二次改写文件
+    await assert.rejects(
+      api.restore({ sessionId, entryId: row.entryId, nonce: view.nonce, expectedCurrentHash: view.expectedCurrentHash }),
+      /INVALID_OR_EXPIRED_PREVIEW/,
+      '票据必须一次性，重放必须被拒',
+    )
+    assert.equal(readFileSync(file, 'utf8'), 'v1-ORIGINAL\n', '重放不得再次改写文件')
+
+    // 5. 恢复时的当前版本（v2）必须进回收站，不能凭空消失
+    assert.ok(receipt.backup, '恢复必须报告备份位置')
+    assert.ok(existsSync(receipt.backup), `备份必须真实存在：${receipt.backup}`)
+    assert.equal(readFileSync(receipt.backup, 'utf8'), 'v2-EDITED\n', '备份内容必须是恢复前的当前版本')
+  })
+
   console.log(`security-regressions: ${count} scenarios passed; temporary fixtures only`)
 } finally { rmSync(root, { recursive: true, force: true }) }
