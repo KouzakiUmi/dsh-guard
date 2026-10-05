@@ -29,6 +29,8 @@ import {
 } from './ledger.js'
 
 import { readConfigValues } from './config.js'
+import { createRollbackApi } from './rollback-preview.js'
+import { rollbackDescriptors, rollbackMethods } from './rollback-remote.js'
 export { Config } from './config.js'
 
 export const name = 'audit-rollback'
@@ -310,12 +312,62 @@ function markDirectRemote(prototype, method) {
   })
 }
 
+auditStatusRemote.descriptors.push(...rollbackDescriptors)
+
 class AuditStatusRemote {
-  read() {
-    throw new Error('auditRollback.read 未绑定')
+  read() { throw new Error('auditRollback.read 未绑定') }
+  changedFiles(request) { throw new Error('auditRollback.changedFiles 未绑定') }
+  preview(request) { throw new Error('auditRollback.preview 未绑定') }
+  restore(request) { throw new Error('auditRollback.restore 未绑定') }
+}
+for (const method of ['read', ...rollbackMethods]) markDirectRemote(AuditStatusRemote.prototype, method)
+
+/**
+ * 会话存在性/可变性校验（HIGH-3）：changedFiles/preview/restore 调用前的 fail-closed 门。
+ * - 存在性走 Host `sessionController.inspect(sessionId)`：现场 0.2.1-alpha.1
+ *   dsh-api-session-controller 的 inspect 是只读路径（attached 快照或
+ *   sessionQuery.observeSession(projectionMode:'none') 的冷读），不激活、不
+ *   resume Agent/模型；resolveAgent/lookup 会冷 resume，明确不用。
+ * - mutation（restore）还要求 `agents.get(sessionId)?.status !== 'running'`，
+ *   防止恢复进行中轮次的会话文件。
+ * - 任一服务缺失或读取失败一律抛错拒绝（SESSION_VERIFIER_UNAVAILABLE），
+ *   不静默放行。
+ */
+function createSessionVerifier(ctx) {
+  const get = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined)
+  const notFound = (sessionId) => {
+    const error = new Error(`SESSION_NOT_FOUND: ${sessionId}`)
+    error.code = 'SESSION_NOT_FOUND'
+    return error
+  }
+  return async function assertSession(sessionId, mutation) {
+    const controller = get('sessionController')
+    if (!controller || typeof controller.inspect !== 'function') {
+      throw new Error('SESSION_VERIFIER_UNAVAILABLE: sessionController 服务缺失，按 fail-closed 拒绝')
+    }
+    try {
+      const inspected = await controller.inspect(sessionId)
+      if (!inspected || !inspected.meta || typeof inspected.meta.id !== 'string') throw notFound(sessionId)
+    } catch (error) {
+      // 现场 ApiSessionNotFound 的消息为 `session "<id>" not found`；其余错误
+      // （持久化读失败等）无法区分「不存在」与「读不出」，一律按校验不可用拒绝。
+      if (error && error.code === 'SESSION_NOT_FOUND') throw error
+      const message = error && error.message ? error.message : String(error)
+      if (/not found/i.test(message)) throw notFound(sessionId)
+      throw new Error(`SESSION_VERIFIER_UNAVAILABLE: ${message}`)
+    }
+    if (mutation) {
+      const agents = get('agents')
+      if (!agents || typeof agents.get !== 'function') {
+        throw new Error('SESSION_VERIFIER_UNAVAILABLE: agents 服务缺失，按 fail-closed 拒绝变更')
+      }
+      const agent = agents.get(sessionId)
+      if (agent && agent.status === 'running') {
+        throw new Error('SESSION_TURN_ACTIVE: 会话有进行中的轮，拒绝恢复活动会话文件')
+      }
+    }
   }
 }
-markDirectRemote(AuditStatusRemote.prototype, 'read')
 
 function exposeAuditRemote(ctx) {
   try {
@@ -330,6 +382,13 @@ function exposeAuditRemote(ctx) {
     service.read = function read() {
       return queryAuditStatus(ctx)
     }
+    const api = createRollbackApi(runtimeByCtx.get(ctx).readConfig().stateDir, {
+      assertSession: createSessionVerifier(ctx),
+    })
+    service.changedFiles = function changedFiles(request) { return api.changedFiles(request) }
+    service.preview = function preview(request) { return api.preview(request) }
+    service.restore = function restore(request) { return api.restore(request) }
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => api.dispose())
     if (typeof ctx.reflect?.provide === 'function') {
       ctx.reflect.provide('auditRollback', service)
     }
@@ -420,7 +479,13 @@ export function apply(ctx, rawConfig) {
     return slot
   }
 
-  /** 对本轮所有已捕获路径补做 capture/after（整轮只做一次，契约第 6.4 条）。 */
+  /**
+   * 对本轮所有已捕获路径补做 capture/after（整轮只做一次，契约第 6.4 条）。
+   * 权威 after 只在 turn/end 采集（MEDIUM-5）：agent/turn-stopping 之后核心仍可
+   * 继续 next step 并落盘（现场 agent-loop 在 stopping 后才 append turn/end），
+   * 在 stopping 采集会把后像记成中间态；abort 而没有 turn/end 的轮次，恢复侧
+   * 本来就以 TURN_NOT_ENDED 拒绝（fail-closed），不需要提前兜底。
+   */
   function captureAfterOnce(sessionId, slot) {
     if (slot.state === null || slot.state.afterDone) return
     slot.state.afterDone = true
@@ -474,18 +539,6 @@ export function apply(ctx, rawConfig) {
     sessions.delete(sessionIdOf(session))
   })
 
-  // agent/turn-stopping：整轮结束前补一次 capture/after（契约第 6.4 条）
-  const offStopping = ctx.on('agent/turn-stopping', async ({ agent }) => {
-    try {
-      const session = agent && agent.session
-      if (session === undefined) return
-      const slot = sessions.get(sessionIdOf(session))
-      if (slot !== undefined) captureAfterOnce(sessionIdOf(session), slot)
-    } catch (error) {
-      ctx.logger.warn(`[audit-rollback] turn-stopping 处理失败: ${error && error.message ? error.message : error}`)
-    }
-  })
-
   // tools/pre-execute：记 call + 捕获 before；绝不能改变调用结果（契约第 5.2 节）
   const offPreExecute = ctx.on(
     'tools/pre-execute',
@@ -506,8 +559,9 @@ export function apply(ctx, rawConfig) {
             turn: slot.turn,
             tool: toolName,
             callId: typeof exec.callId === 'string' ? exec.callId : '',
-            argsSha1: sha1Hex(Buffer.from(previewArgs(exec.arguments, config.argsMaxBytes), 'utf8')),
-            argsPreview: previewArgs(exec.arguments, config.argsMaxBytes),
+            // Do not persist raw tool arguments (file content, credentials, tokens).
+            argsSha1: sha1Hex(Buffer.from(previewArgs({ keys: Object.keys(exec.arguments ?? {}) }, config.argsMaxBytes), 'utf8')),
+            argsPreview: previewArgs({ keys: Object.keys(exec.arguments ?? {}) }, config.argsMaxBytes),
             targets,
           })
         }
@@ -524,6 +578,8 @@ export function apply(ctx, rawConfig) {
             turn: slot.turn,
             path: target,
             phase: 'before',
+            tool: toolName,
+            callId: typeof exec.callId === 'string' ? exec.callId : '',
             maxBytes: config.captureMaxBytes,
             turnState: slot.state,
           })
@@ -541,7 +597,6 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() => () => {
     offSessionEvent()
     offDisposed()
-    offStopping()
     offPreExecute()
     sessions.clear()
   })

@@ -28,7 +28,7 @@ function factory(react) {
   let ui
   vm.runInNewContext(source, {
     window: { __ModuleLoader__: { load({ factory }) { ui = factory(id => { assert.equal(id, 'react'); return react }) } } },
-    console: { info() {}, warn() {}, error(...args) { throw new Error(args.join(' ')) } }, setTimeout, Date, Promise,
+    console: { info() {}, warn() {}, error(...args) { throw new Error(args.join(' ')) } }, setTimeout, clearTimeout, Date, Promise,
   })
   return ui
 }
@@ -298,9 +298,11 @@ console.log('PASS asynchronous generations: stale refresh success/error, depende
     locale: { register() { return () => {} }, bind() { return key => ui.dictionaries.en[key] || key } },
     get(name) { if (name === 'remote.session') return service; if (name === 'remote.settings') return settings; throw new Error(`Unexpected service: ${name}`) },
     effect(fn) { const value = fn(); effects.push(value); return value },
-    slots: { spec() { return {} }, inject(slot, fn) { assert.equal(slot, 'settings.plugins.tab'); const dispose = fn(); effects.push(dispose) }, register(entry) { entries.push(entry); return () => entries.pop() } },
+    slots: { spec() { return {} }, inject(slot, fn) { assert.ok(['settings.plugins.tab', 'conversation.view', 'conversation.composer.dock'].includes(slot)); const dispose = fn(); effects.push(dispose) }, register(entry) { entries.push(entry); return () => entries.pop() } },
   }
   ui.apply(ctx)
+  assert.deepEqual(entries.map(row => row.name), ['settings.plugins.tab', 'conversation.view', 'conversation.composer.dock'])
+  assert.equal(entries.filter(row => row.name === 'settings.plugins.tab').length, 1)
   const props = entries[0].inject()
   assert.equal(typeof props.loadCatalog, 'function')
   assert.deepEqual(await props.loadCatalog(), catalog)

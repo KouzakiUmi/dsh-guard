@@ -4,10 +4,10 @@
  *
  * 用最小假 ctx 桩调用 apply(ctx, {})：
  *   - 不抛错；
- *   - 注册了 4 个事件名：session/event、session/disposed、
- *     agent/turn-stopping、tools/pre-execute；
- *   - 顺带验证：模拟一轮完整事件流（turn/start → pre-execute 捕获 →
- *     turn-stopping → turn/end）后账本里出现 before/after 捕获，
+ *   - 注册了 3 个事件名：session/event、session/disposed、tools/pre-execute
+ *     （MEDIUM-5：权威 after 只在 turn/end 采集，不再注册 agent/turn-stopping）；
+ *   - 顺带验证：模拟一轮完整事件流（turn/start → pre-execute 捕获 → turn/end）
+ *     后账本里出现 before/after 捕获，
  *     且 pre-execute 永远返回 next() 的结果（不改变调用结果的红线）。
  *
  * 为避免写 ~/.dsh（契约第 9 节），测试期间把 DSH_HOME 指到 test/.tmp/
@@ -74,11 +74,12 @@ await ok('apply(ctx, {}) 不抛错，且导出 name/inject 符合契约', () => 
   apply(fakeCtx, {})
 })
 
-// ---- 注册了契约要求的 4 个事件名 ----
-await ok('注册了 session/event、session/disposed、agent/turn-stopping、tools/pre-execute 四个事件', () => {
-  for (const eventName of ['session/event', 'session/disposed', 'agent/turn-stopping', 'tools/pre-execute']) {
+// ---- 注册了契约要求的 3 个事件名（且不再有 agent/turn-stopping）----
+await ok('注册了 session/event、session/disposed、tools/pre-execute 三个事件，无 agent/turn-stopping', () => {
+  for (const eventName of ['session/event', 'session/disposed', 'tools/pre-execute']) {
     assert.ok(registered.includes(eventName), `缺少事件注册：${eventName}`)
   }
+  assert.ok(!registered.includes('agent/turn-stopping'), 'MEDIUM-5：不得再注册 agent/turn-stopping')
 })
 
 // ---- 驱动一轮完整事件流：before/after 落账，pre-execute 不改变调用结果 ----
@@ -103,7 +104,6 @@ await ok('模拟一轮事件流后账本出现 before/after 捕获，且 pre-exe
     return sentinel
   })
   assert.equal(result, sentinel, 'pre-execute 必须返回 next() 的结果')
-  await handlers.get('agent/turn-stopping')({ agent: { session }, turn: 7 })
   handlers.get('session/event')(session, { type: 'turn/end', data: { turn: 7 } })
 
   const entries = readAllEntries(join(fakeHome, 'audit-rollback'))

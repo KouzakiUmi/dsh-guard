@@ -1,6 +1,14 @@
-# dsh-auto-review-router 0.2.3
+# dsh-auto-review-router 0.3.0
 
-可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。
+可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。0.3.0 起增加官方人工审批继承及按会话隔离的持久审批历史；GUI 实机验收在发布安装后另行记录。
+
+## 审批历史与人工审批继承（开发树）
+
+- 仅合法 reviewer `deny` 可进入人工继承；reviewer 错误、协议/路由无效、超时或缺 schema 仍 fail-closed。有效审批策略为 `never` 时不发起人工提示；`manualFallback=false` 时同样不提示。
+- 默认人工等待 60 秒（可配 1,000–300,000 ms）。超时通过传给官方审批请求的 AbortSignal 取消该请求；超时、卸载或关闭不会把迟到的人工允许转成放行。人工 `allowed-once` 之后仍由核心执行最终 guard/取消检查。
+- 会话「审批历史」Tab 与 composer dock 的结果摘要是 SDK `0.2.1-alpha.1` 所支持的视图：**不是每张工具卡片徽标，也不是轨迹行内提示**。`reported-result` 只代表框架报告，不能证明工具 body 确实执行；不得把它显示成已执行保证。
+- 历史写入 profile 下独立 JSONL，不向 alpha.1 的 Session 文件追加私有事件。每个会话 ledger 最多 16 MiB，达到上限后记录缺口，不自动轮转/删除；串行化只覆盖同一 Host 进程的 writer，不是跨进程原子锁。缺 profile、队列满、损坏或读写失败会显示健康缺口，不改变审批决定。
+- 持久内容采用字段 allowlist 和摘要遮罩，但遮罩只是尽力降低泄漏风险，不能识别任意秘密。账本不应被视为通用敏感信息脱敏器。
 
 ## 工具 schema 来源（0.2.3 修复）
 
@@ -40,6 +48,8 @@ native 工具执行对象通常不携带 `exec.schema`；工具描述和参数 s
 | `temperature` | `0` | 有限数字 0–2 |
 | `timeoutMs` | `20000` | 整数 1–300000，超时 fail-closed |
 | `logDecisions` | `true` | 记录工具名、路由、风险、决定、耗时，不记录请求正文 |
+| `manualFallback` | `true` | 合法 reviewer deny 且下游允许时请求官方单次人工审批；`never` 与关闭此项均不提示 |
+| `manualApprovalTimeoutMs` | `60000` | 官方人工请求的超时毫秒数，整数 1000–300000；超时通过请求 signal 取消
 
 启用并关闭回退时必须选择完整 reviewer 路由。provider/model 留空且允许回退时，每次从 `session.requestHeader().config` 读取会话路由；不可用则拒绝。部分填写不再静默回退，而是在保存前拒绝。
 
@@ -77,10 +87,19 @@ $env:DSH_APP_ROOT = 'C:\Program Files\DSH NEXT\resources\app'
 node packages/dsh-auto-review-router/test/selftest.mjs
 node packages/dsh-auto-review-router/test/plugin-smoke.mjs
 node packages/dsh-auto-review-router/test/status.mjs
-node packages/dsh-auto-review-router/test/settings.mjs
-node packages/dsh-auto-review-router/test/configured-model-picker.mjs
-node packages/dsh-auto-review-router/test/lifecycle.mjs
+node packages/dsh-auto-review-router/test/navigation.mjs
 node packages/dsh-auto-review-router/test/loader-settings.mjs
+node packages/dsh-auto-review-router/test/pending-schema.mjs
+node packages/dsh-auto-review-router/test/manual-config.mjs
+node packages/dsh-auto-review-router/test/configured-model-picker.mjs
+node packages/dsh-auto-review-router/test/settings.mjs
+node packages/dsh-auto-review-router/test/history-ui.mjs
+node packages/dsh-auto-review-router/test/approval-history.mjs
+node packages/dsh-auto-review-router/test/manual-fallback.mjs
+node packages/dsh-auto-review-router/test/lifecycle.mjs
+```
+
+`tools/verify.mjs` 自动枚举 `test/` 下的 `.mjs` 并排除 `runtime.mjs` / `bootstrap.mjs` 等辅助文件；`package.json` 的 `scripts.test` 显式列出同一组 13 项。发布运行清单含 `README.zh.md`、patch、`lib/index.js`、`lib/client.js`、`lib/config.js`、`lib/policy.js`、`lib/context.js` 和 `lib/approval-history.js`；测试与辅助加载器不随包发布。
 ```
 
 `loader-settings` 真实挂载 Cordis Loader、官方 Settings 与 ConfigEditor，在测试创建的临时 home/profile/bundle 中验证持久化、revision、拒绝写入、稳定 fiber/引用、每请求快照、路由/effort热改、在途禁用、启停与审批不变；llm、权限选择与会话为合成服务，不执行真实工具体。`settings` 加载真实 lazy client factory，验证官方保存接口及表单错误；`lifecycle` 补充冲突、失败收紧、重试及卸载回归。不是浏览器实机安装验收。

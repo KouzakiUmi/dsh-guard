@@ -9,21 +9,30 @@
  * 字段名、目录布局、kind 取值逐字遵守 docs/design-audit-rollback.md 第 3、4 节。
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   appendFileSync,
+  constants,
+  closeSync,
+  fstatSync,
+  fsyncSync,
+  writeSync,
+  lstatSync,
+  openSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  readSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, posix, resolve, sep, win32 } from 'node:path'
+import { dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from 'node:path'
 
 /** 账本条目版本号（契约第 4 节：所有条目恒为 1）。 */
 export const LEDGER_VERSION = 1
@@ -62,6 +71,17 @@ export function sha1Hex(buffer) {
   return createHash('sha1').update(buffer).digest('hex')
 }
 
+/**
+ * 路径聚合键（预览/回滚侧归并同一物理文件的大小写别名）：
+ * win32 下 NTFS 默认大小写不敏感，`target.txt` 与 `TARGET.TXT` 是同一文件，
+ * 聚合一律用小写键；其它平台原样返回。
+ * 注意方向：这只用于「把疑似同一路径的账本条目归并/互相佐证」，归并错只会让
+ * 一致性校验变严而拒绝恢复（fail-closed），不会放行本不该放行的恢复。
+ */
+export function canonicalPathKey(absPath) {
+  return process.platform === 'win32' ? String(absPath).toLowerCase() : String(absPath)
+}
+
 /** 当前 UTC 日期（YYYY-MM-DD），账本按此分文件。 */
 export function utcDate(now = new Date()) {
   return now.toISOString().slice(0, 10)
@@ -74,24 +94,69 @@ export function ledgerFile(stateDir, date = utcDate()) {
 
 /** CAS 对象路径：<stateDir>/objects/<sha1[0:2]>/<sha1> */
 export function objectPath(stateDir, hash) {
+  if (typeof hash !== 'string' || !/^[a-f0-9]{40}$/.test(hash)) throw new Error('INVALID_OBJECT_HASH')
   return join(stateDir, 'objects', hash.slice(0, 2), hash)
 }
+
+/** Validate every existing ancestor; create each missing directory without recursive traversal. */
+export function safeMkdir(dir) {
+  let info
+  try { info = lstatSync(dir) } catch (e) { if (e.code !== 'ENOENT') throw e }
+  if (!info) {
+    const parent = dirname(dir)
+    if (parent === dir) throw new Error('UNSAFE_MISSING_ROOT')
+    safeMkdir(parent)
+    pathGuards(dir)
+    try { mkdirSync(dir) } catch (e) { if (e.code !== 'EEXIST') throw e }
+    info = lstatSync(dir)
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('UNSAFE_STATE_DIRECTORY')
+  pathGuards(join(dir, '.guard'))
+}
+
+function safeLeaf(file) {
+  let info
+  try { info = lstatSync(file) } catch (e) { if (e.code === 'ENOENT') return null; throw e }
+  const physical = realpathSync.native(file)
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 ||
+      (process.platform === 'win32' ? physical.toLowerCase() !== file.toLowerCase() : physical !== file)) throw new Error('UNSAFE_STATE_FILE')
+  return info
+}
+
+/** Append or create using the verified file descriptor; never truncate an existing file. */
+export function safeStateWrite(file, data, { append = false, exclusive = false } = {}) {
+  const guards = pathGuards(file)
+  const existing = safeLeaf(file)
+  if (exclusive && existing) throw new Error('STATE_FILE_EXISTS')
+  const fd = openSync(file, constants.O_WRONLY | (constants.O_NOFOLLOW || 0) |
+    (existing ? (append ? constants.O_APPEND : 0) : constants.O_CREAT | constants.O_EXCL), 0o600)
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.nlink !== 1 || (existing && (opened.dev !== existing.dev || opened.ino !== existing.ino))) throw new Error('STATE_FILE_EXCHANGED')
+    const leaf = safeLeaf(file)
+    if (!leaf || leaf.dev !== opened.dev || leaf.ino !== opened.ino || !sameGuards(guards, pathGuards(file))) throw new Error('STATE_PATH_EXCHANGED')
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8')
+    let offset = 0
+    while (offset < bytes.length) {
+      const n = writeSync(fd, bytes, offset, bytes.length - offset, append ? null : offset)
+      if (!n) throw new Error('STATE_SHORT_WRITE')
+      offset += n
+    }
+    fsyncSync(fd)
+  } finally { closeSync(fd) }
+}
+function sameGuards(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
 
 /**
  * 初始化状态目录（契约第 6.1 条）：
  * 建 ledger/ 与 objects/ 目录；state.json 不存在则创建（不覆盖已有）。
  */
 export function initState(stateDir) {
-  mkdirSync(join(stateDir, 'ledger'), { recursive: true })
-  mkdirSync(join(stateDir, 'objects'), { recursive: true })
+  safeMkdir(join(stateDir, 'ledger'))
+  safeMkdir(join(stateDir, 'objects'))
   const stateFile = join(stateDir, 'state.json')
-  if (!existsSync(stateFile)) {
-    writeFileSync(
-      stateFile,
-      JSON.stringify({ version: 1, createdAt: new Date().toISOString() }) + '\n',
-      'utf8',
-    )
-  }
+  pathGuards(stateFile)
+  if (!safeLeaf(stateFile)) safeStateWrite(stateFile, JSON.stringify({ version: 1, createdAt: new Date().toISOString() }) + '\n', { exclusive: true })
 }
 
 /**
@@ -101,7 +166,7 @@ export function initState(stateDir) {
  */
 export function appendEntry(stateDir, entry) {
   const full = { v: LEDGER_VERSION, ts: new Date().toISOString(), ...entry }
-  appendFileSync(ledgerFile(stateDir), JSON.stringify(full) + '\n', 'utf8')
+  safeStateWrite(ledgerFile(stateDir), JSON.stringify(full) + '\n', { append: true })
   return full
 }
 
@@ -113,9 +178,11 @@ export function appendEntry(stateDir, entry) {
 export function putObject(stateDir, buffer) {
   const hash = sha1Hex(buffer)
   const file = objectPath(stateDir, hash)
-  if (!existsSync(file)) {
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, buffer)
+  safeMkdir(dirname(file))
+  pathGuards(file)
+  if (!safeLeaf(file)) {
+    try { safeStateWrite(file, buffer, { exclusive: true }) }
+    catch (error) { if (error.code !== 'EEXIST') throw error; pathGuards(file); safeLeaf(file) }
   }
   return hash
 }
@@ -202,7 +269,9 @@ export function matchesAnyGlob(absPath, globs) {
  * 一轮的内存态（插件每个会话每轮各持有一份；自测直接新建）。
  * - capturedPaths：本轮捕获过的路径（turn/end 的 captured 计数、after 遍历依据）
  * - beforeSeen：已写过 before 的路径（契约第 4 节：同轮同路径 before 只记第一条）
- * - afterDone：本轮是否已做过 after 捕获（turn-stopping 与 turn/end 共用标志位）
+ * - afterDone：本轮是否已做过 after 捕获（权威 after 只在 turn/end 采集一次；
+ *   turn-stopping 不再写 after——stopping 之后核心仍可继续落盘，提前采集会把
+ *   后像记成中间态；无 turn/end 的轮次恢复侧本来就以 TURN_NOT_ENDED 拒绝）
  */
 export function createTurnState() {
   return { capturedPaths: new Set(), beforeSeen: new Set(), afterDone: false }
@@ -216,14 +285,69 @@ export function createTurnState() {
  *   「读不出来」不等于「不存在」。若把目录/权限错误记成 existed:false，
  *   回滚时会把原本存在的文件当新建处理而 trash 掉（核验者用目录实证过）。
  */
-export function probeFile(absPath) {
-  try {
-    const buffer = readFileSync(absPath)
-    return { existed: true, buffer, bytes: buffer.length }
-  } catch (error) {
-    if (error && error.code === 'ENOENT') return { existed: false, buffer: null, bytes: 0 }
-    return { existed: null, buffer: null, bytes: 0, error }
+export function fileIdentity(info) {
+  return { dev: String(info.dev), ino: String(info.ino), mode: info.mode, nlink: info.nlink,
+    size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs }
+}
+
+/** No symlinks/reparse redirection, directories, ADS or lexical traversal. Missing leaf only. */
+export function pathGuards(absPath) {
+  if (typeof absPath !== 'string' || !isAbsolute(absPath) || resolve(absPath) !== absPath ||
+      absPath.includes('\0') || absPath.split(/[/\\]+/).includes('..') ||
+      (process.platform === 'win32' && (absPath.slice(2).includes(':') || absPath.startsWith('\\\\?')))) {
+    throw new Error('UNSAFE_PATH')
   }
+  const guards = []
+  let dir = dirname(absPath)
+  for (;;) {
+    const info = lstatSync(dir)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('UNSAFE_ANCESTOR')
+    const physical = realpathSync.native(dir)
+    const equal = process.platform === 'win32' ? physical.toLowerCase() === dir.toLowerCase() : physical === dir
+    if (!equal) throw new Error('PATH_REDIRECTION')
+    guards.push({ path: dir, dev: String(info.dev), ino: String(info.ino), physical })
+    if (dir === parse(dir).root) break
+    dir = dirname(dir)
+  }
+  return guards
+}
+
+export function probeFile(absPath, maxBytes = Number.MAX_SAFE_INTEGER) {
+  let fd
+  try {
+    const guards = pathGuards(absPath)
+    let info
+    try { info = lstatSync(absPath) }
+    catch (error) {
+      if (error.code === 'ENOENT') return { existed: false, buffer: null, bytes: 0, identity: null, guards }
+      throw error
+    }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error('UNSAFE_FILE_TYPE')
+    const physical = realpathSync.native(absPath)
+    if (process.platform === 'win32' ? physical.toLowerCase() !== absPath.toLowerCase() : physical !== absPath) throw new Error('FILE_PATH_REDIRECTION')
+    fd = openSync(absPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    const opened = fstatSync(fd)
+    if (opened.dev !== info.dev || opened.ino !== info.ino || !opened.isFile()) throw new Error('PATH_EXCHANGED')
+    const identity = fileIdentity(opened)
+    if (opened.size > maxBytes) return { existed: true, buffer: null, bytes: opened.size, identity, guards, oversized: true }
+    const chunks = []
+    let total = 0
+    for (;;) {
+      const chunk = Buffer.alloc(Math.min(65536, maxBytes - total + 1))
+      const count = readSync(fd, chunk, 0, chunk.length, null)
+      if (!count) break
+      total += count
+      if (total > maxBytes) throw new Error('FILE_EXCEEDED_LIMIT')
+      chunks.push(chunk.subarray(0, count))
+    }
+    const buffer = Buffer.concat(chunks)
+    if (buffer.length > maxBytes || JSON.stringify(fileIdentity(fstatSync(fd))) !== JSON.stringify(identity)) throw new Error('FILE_CHANGED_DURING_READ')
+    if (JSON.stringify(pathGuards(absPath)) !== JSON.stringify(guards) || lstatSync(absPath).ino !== opened.ino) throw new Error('PATH_EXCHANGED')
+    return { existed: true, buffer, bytes: buffer.length, identity, guards }
+  } catch (error) {
+    if (!error.code) error.code = 'EUNSAFE'
+    return { existed: null, buffer: null, bytes: 0, error }
+  } finally { if (fd !== undefined) closeSync(fd) }
 }
 
 /**
@@ -240,7 +364,7 @@ export function probeFile(absPath) {
 export function capturePath(stateDir, options) {
   const { session, turn, path: absPath, phase, maxBytes, turnState } = options
   if (phase === 'before' && turnState !== undefined && turnState.beforeSeen.has(absPath)) return null
-  const probe = probeFile(absPath)
+  const probe = probeFile(absPath, maxBytes)
   if (probe.existed === null) {
     // 读失败（非 ENOENT，契约 F4 修正）：不得记 existed:false、不写这条 capture；
     // 抛出由上层（插件事件处理器）warn，且不占 beforeSeen 名额（下次可重试）。
@@ -260,9 +384,14 @@ export function capturePath(stateDir, options) {
   }
   const entry = appendEntry(stateDir, {
     kind: 'capture',
+    id: randomUUID(),
     session,
     turn,
     path: absPath,
+    identity: probe.identity,
+    guards: probe.guards,
+    ...(typeof options.tool === 'string' ? { tool: options.tool } : {}),
+    ...(typeof options.callId === 'string' ? { callId: options.callId } : {}),
     phase,
     hash,
     bytes: probe.bytes,

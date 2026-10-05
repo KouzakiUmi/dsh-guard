@@ -26,6 +26,18 @@ window.__ModuleLoader__.load({
       field_includeProjectInstructions: '加入项目指令', field_temperature: '温度', field_timeoutMs: '超时（毫秒）', field_logDecisions: '记录审查决定',
       required: '必填', range: '超出范围或不是合法整数', pair: 'provider 与 model 必须同时填写或同时留空', effortRoute: 'effort 需要完整审查路由', noFallbackRoute: '关闭回退时必须填写审查路由',
       missingRevision: '缺少修订号，请重新读取', remoteFailed: '设置调用失败', readOnly: '设置不可写', noForm: '找不到唯一活动配置条目',
+      field_manualFallback: '高危拒绝转官方人工审批', field_manualApprovalTimeoutMs: '人工审批超时（毫秒）',
+      manualNote: '高危审查拒绝可转交官方人工审批；默认 60 秒，超时由 Host 取消并拒绝。Never 策略不变，本页不提供人工放行按钮。',
+      auditNote: '关闭 logDecisions 仅停止旧日志输出，不关闭持久审批历史。',
+      historyTitle: '审批历史', historyScope: '当前会话持久审批历史；结果提示仅在输入区下方展示，不是聊天或轨迹工具卡片徽章。',
+      historyExecutionNote: '审查允许 ≠ 工具已执行；未收到执行报告时结果未知。', historyLoading: '正在读取审批历史…', historyFailed: '审批历史读取失败（保留已读记录）',
+      historyEmpty: '当前会话没有审批记录。', historyNoSession: '请先选择会话。', historyBlank: '请先开始会话。', historyGap: '历史可能不完整或不可用，请检查审计健康状态。',
+      historyRisk: '风险', historyRoute: '审查路由', historyLocation: '轮次 / 步骤 / 调用', historyUnknown: '未知', historyUnlinked: '未建立唯一调用关联', historyInspect: '在轨迹中查看调用', historyOlder: '加载更早记录', historyTimeout: '人工审批超时，已拒绝',
+      historyPhase_reviewer: '自动审查', historyPhase_downstream: '权限审批', historyPhase_manual: '人工审批', 'historyPhase_reported-result': '工具执行报告',
+      history_reviewer_allow: '审查允许（不代表执行）', history_reviewer_deny: '审查拒绝', history_reviewer_failure: '审查失败', history_reviewer_cancel: '审查取消',
+      history_downstream_allow: '权限允许（不代表执行）', history_downstream_deny: '权限拒绝', history_downstream_ask: '请求人工审批', history_downstream_cancel: '权限审批取消', history_downstream_failure: '权限审批失败',
+      'history_manual_allowed-once': '人工仅本次允许（不代表执行）', history_manual_requested: '等待官方人工审批', history_manual_rejected: '人工拒绝', history_manual_cancelled: '人工审批取消', history_manual_unavailable: '人工审批不可用',
+      'history_reported-result_reported-ok': '已报告执行成功', 'history_reported-result_reported-error': '已报告执行错误', 'history_reported-result_unknown': '执行结果未知',
       title: 'Auto 审查路由',
       refresh: '刷新',
       refreshing: '刷新中…',
@@ -67,6 +79,18 @@ window.__ModuleLoader__.load({
       field_includeProjectInstructions: 'Include project instructions', field_temperature: 'Temperature', field_timeoutMs: 'Timeout (ms)', field_logDecisions: 'Log review decisions',
       required: 'Required', range: 'Out of range or invalid integer', pair: 'Provider and model must both be filled or empty', effortRoute: 'Effort requires a complete reviewer route', noFallbackRoute: 'A reviewer route is required when fallback is off',
       missingRevision: 'Missing revision; reload configuration', remoteFailed: 'Settings request failed', readOnly: 'Settings are read-only', noForm: 'No unique active configuration entry',
+      field_manualFallback: 'Escalate high-risk denial to official approval', field_manualApprovalTimeoutMs: 'Manual approval timeout (ms)',
+      manualNote: 'A high-risk denial can use official manual approval; default 60 seconds. Host cancels and rejects on timeout. Never policy is unchanged; this page has no allow button.',
+      auditNote: 'Disabling logDecisions only stops legacy log output, not durable approval history.',
+      historyTitle: 'Approval history', historyScope: 'Durable history for this session. The reminder is below the composer, not a chat or trajectory tool-card badge.',
+      historyExecutionNote: 'Review allow ≠ tool execution; execution is unknown without a reported result.', historyLoading: 'Reading approval history…', historyFailed: 'Approval history read failed (retaining loaded records)',
+      historyEmpty: 'No approval records for this session.', historyNoSession: 'Select a session first.', historyBlank: 'Start a conversation first.', historyGap: 'History may be incomplete or unavailable; check audit health.',
+      historyRisk: 'Risk', historyRoute: 'Reviewer route', historyLocation: 'Turn / step / call', historyUnknown: 'Unknown', historyUnlinked: 'No verified unique call association', historyInspect: 'Inspect call in trajectory', historyOlder: 'Load earlier records', historyTimeout: 'Manual approval timed out; rejected',
+      historyPhase_reviewer: 'Auto review', historyPhase_downstream: 'Permission approval', historyPhase_manual: 'Manual approval', 'historyPhase_reported-result': 'Reported tool result',
+      history_reviewer_allow: 'Review allowed (not execution)', history_reviewer_deny: 'Review denied', history_reviewer_failure: 'Review failed', history_reviewer_cancel: 'Review cancelled',
+      history_downstream_allow: 'Permission allowed (not execution)', history_downstream_deny: 'Permission denied', history_downstream_ask: 'Manual approval requested', history_downstream_cancel: 'Permission approval cancelled', history_downstream_failure: 'Permission approval failed',
+      'history_manual_allowed-once': 'Allowed once by human (not execution)', history_manual_requested: 'Waiting for official manual approval', history_manual_rejected: 'Rejected by human', history_manual_cancelled: 'Manual approval cancelled', history_manual_unavailable: 'Manual approval unavailable',
+      'history_reported-result_reported-ok': 'Execution reported successful', 'history_reported-result_reported-error': 'Execution reported an error', 'history_reported-result_unknown': 'Execution result unknown',
       title: 'Auto review router',
       refresh: 'Refresh',
       refreshing: 'Refreshing…',
@@ -95,15 +119,28 @@ window.__ModuleLoader__.load({
       guidanceBody: 'Use the form above. Official Settings and ConfigEditor own persistence and revision checks. Refused or stale edits never overwrite current configuration.',
     }
 
+    // 与 Host lib/index.js 的 parseRouterStatus 逻辑逐句一致；互反样例见 test/status.mjs。
     function parseStatus(value) {
       if (!value || typeof value !== 'object' || value.plugin !== 'dsh-auto-review-router') {
         throw new Error('Invalid auto-review-router status')
       }
-      if (!value.registration || typeof value.registration.registered !== 'boolean') {
+      const registration = value.registration
+      if (!registration || typeof registration !== 'object'
+        || typeof registration.observed !== 'boolean' || typeof registration.attempted !== 'boolean'
+        || typeof registration.registered !== 'boolean' || typeof registration.conflict !== 'boolean'
+        || typeof registration.closeFailed !== 'boolean'
+        || (registration.conflictWarning !== null && typeof registration.conflictWarning !== 'string')
+        || (registration.error !== null && typeof registration.error !== 'string')) {
         throw new Error('Invalid auto-review-router status.registration')
       }
       if (!value.route || typeof value.route.source !== 'string') throw new Error('Invalid auto-review-router status.route')
-      if (!value.budget || typeof value.budget.timeoutMs !== 'number') throw new Error('Invalid auto-review-router status.budget')
+      const budget = value.budget
+      if (!budget || typeof budget !== 'object'
+        || typeof budget.maxContextBytes !== 'number' || typeof budget.historyLimit !== 'number'
+        || typeof budget.timeoutMs !== 'number' || typeof budget.temperature !== 'number'
+        || typeof budget.logDecisions !== 'boolean') {
+        throw new Error('Invalid auto-review-router status.budget')
+      }
       return value
     }
 
@@ -124,7 +161,18 @@ window.__ModuleLoader__.load({
             create: () => ({ parse: parseStatus }),
           },
         },
+        {
+          id: 'dsh-auto-review-router#autoReviewRouter/history',
+          service: 'autoReviewRouter', namespace: 'autoReviewRouter', method: 'history',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'request', wire: 'request', source: 'json',
+            codec: statusCodec('dsh-auto-review-router#ApprovalHistoryRequest', parseHistoryRequest) }],
+          result: statusCodec('dsh-auto-review-router#ApprovalHistoryResult', parseHistoryResult),
+        },
       ],
+    }
+    function statusCodec(typeSymbol, parse) {
+      return { mode: 'strict', typeSymbol, schema: { parse }, create: () => ({ parse }) }
     }
 
     const pageStyle = { padding: 16, maxWidth: 760, font: '13px/1.55 sans-serif' }
@@ -154,6 +202,7 @@ window.__ModuleLoader__.load({
       ['enabled', 'boolean'], ['reviewerProvider', 'string'], ['reviewerModel', 'string'], ['reviewerEffort', 'string'],
       ['fallbackToSessionRoute', 'boolean'], ['maxContextBytes', 'number', 1, 1048576], ['historyLimit', 'number', 0, 1000],
       ['includeProjectInstructions', 'boolean'], ['temperature', 'number', 0, 2], ['timeoutMs', 'number', 1, 300000], ['logDecisions', 'boolean'],
+      ['manualFallback', 'boolean'], ['manualApprovalTimeoutMs', 'number', 1000, 300000],
     ]
     function validateDraft(draft, t = key => zh[key] || key) {
       const values = {}
@@ -351,6 +400,8 @@ window.__ModuleLoader__.load({
         h('section', { style: cardStyle },
           h('h3', null, t('configuration')),
           h('p', null, t('safety')),
+          h('p', null, t('manualNote')),
+          h('p', null, t('auditNote')),
           h('h4', null, t('catalogTitle')),
           h('p', null, t('catalogNote')),
           h('button', { type: 'button', disabled: saving, style: btnStyle, onClick: reloadCatalog }, catalog.status === 'loading' ? t('catalogRefreshing') : t('catalogRefresh')),
@@ -417,6 +468,215 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // UI-only history: no prompt/messages, no tool renderer replacement, no approval buttons.
+    const HISTORY_ERRORS = new Set(['invalid-request', 'session-not-found', 'session-unavailable', 'history-unavailable'])
+    const safeText = (value, length = 240) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, length) : ''
+    // These browser-only parsers mirror approval-history.js. No Node module import.
+    const PHASES = {
+      reviewer: ['allow', 'deny', 'failure', 'cancel'],
+      downstream: ['allow', 'deny', 'ask', 'cancel', 'failure'],
+      manual: ['requested', 'allowed-once', 'rejected', 'cancelled', 'unavailable'],
+      'reported-result': ['reported-ok', 'reported-error', 'unknown'],
+    }
+    const OPTIONAL_TEXT = { parentDispatchId: 80, parentCallId: 200, subCallId: 200,
+      approvalRequestId: 80, cause: 80, errorName: 80, errorCode: 80, route: 160, reasonSummary: 240 }
+    const OPTIONAL_NUMBERS = ['callEventSeq', 'durationMs', 'deadlineAt', 'sourceSeq']
+    const CODE_TOKEN = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/
+    const UUID = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i
+    const int = value => Number.isSafeInteger(value) && value >= 0
+    const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+    const text = (value, max) => typeof value === 'string' && value.length <= max && !/[\x00-\x1f\x7f]/.test(value)
+    function parseHistoryRequest(value) {
+      if (!plain(value) || Object.keys(value).some(key => !['sessionId', 'cursor', 'limit'].includes(key))
+        || !text(value.sessionId, 200) || !value.sessionId.trim()
+        || value.cursor !== undefined && (!text(value.cursor, 1024) || !/^[A-Za-z0-9_-]+$/.test(value.cursor))
+        || value.limit !== undefined && (!int(value.limit) || value.limit < 1 || value.limit > 100)) {
+        throw new TypeError('Invalid approval history request')
+      }
+      return { sessionId: value.sessionId, ...(value.cursor === undefined ? {} : { cursor: value.cursor }), limit: value.limit ?? 50 }
+    }
+    function parseHistoryRecord(value) {
+      const required = ['schemaVersion', 'eventId', 'time', 'ledgerSeq', 'dispatchId', 'sessionId', 'turn', 'step', 'callId', 'rootCallId', 'toolName', 'phase', 'outcome']
+      if (!plain(value) || Object.keys(value).some(key => ![...required, ...Object.keys(OPTIONAL_TEXT), ...OPTIONAL_NUMBERS, 'risk'].includes(key))
+        || required.some(key => !Object.hasOwn(value, key)) || value.schemaVersion !== 1
+        || !UUID.test(value.eventId) || !UUID.test(value.dispatchId) || !int(value.time) || !int(value.ledgerSeq)
+        || !text(value.sessionId, 200) || !value.sessionId.trim() || !text(value.callId, 200) || !text(value.rootCallId, 200)
+        || !text(value.toolName, 160) || !PHASES[value.phase]?.includes(value.outcome)
+        || value.turn !== null && !int(value.turn) || value.step !== null && !int(value.step)
+        || Object.entries(OPTIONAL_TEXT).some(([key, max]) => value[key] !== undefined && !text(value[key], max))
+        || ['errorName', 'errorCode'].some(key => value[key] !== undefined && !CODE_TOKEN.test(value[key]))
+        || OPTIONAL_NUMBERS.some(key => value[key] !== undefined && !int(value[key]))
+        || value.risk !== undefined && !['low', 'medium', 'high'].includes(value.risk)) {
+        throw new TypeError('Invalid approval history record')
+      }
+      return value
+    }
+    function parseHistoryResult(value) {
+      if (!plain(value) || typeof value.ok !== 'boolean') throw new TypeError('Invalid approval history result')
+      if (!value.ok) {
+        if (Object.keys(value).some(key => !['ok', 'error'].includes(key)) || !plain(value.error)
+          || Object.keys(value.error).some(key => !['code', 'message'].includes(key))
+          || !['invalid-request', 'session-not-found', 'session-unavailable', 'history-unavailable'].includes(value.error.code)
+          || !text(value.error.message, 200)) throw new TypeError('Invalid approval history error')
+        return value
+      }
+      const page = value.value, health = page?.health
+      if (Object.keys(value).some(key => !['ok', 'value'].includes(key)) || !plain(page)
+        || Object.keys(page).some(key => !['records', 'nextCursor', 'health'].includes(key))
+        || !Array.isArray(page.records) || page.records.length > 100
+        || page.nextCursor !== null && !text(page.nextCursor, 1024) || !plain(health)
+        || Object.keys(health).some(key => !['ready', 'gap', 'writeFailures', 'readFailures', 'droppedRecords', 'corruptRecords', 'missingProfile', 'closing', 'lastErrorCode'].includes(key))
+        || ['ready', 'gap', 'missingProfile', 'closing'].some(key => typeof health[key] !== 'boolean')
+        || ['writeFailures', 'readFailures', 'droppedRecords', 'corruptRecords'].some(key => !int(health[key]))
+        || health.lastErrorCode !== null && !text(health.lastErrorCode, 80)) throw new TypeError('Invalid approval history page')
+      for (const record of page.records) parseHistoryRecord(record)
+      return value
+    }
+    const parseHistory = value => parseHistoryResult({ ok: true, value }).value
+    // One source/poller per session, shared by history Tab and resident dock. Requests
+    // are read-only; abort invalidates their local lifetime even if transport cannot cancel.
+    function createHistoryStore(read, options = {}) {
+      const timer = options.setTimeout || setTimeout
+      const clearTimer = options.clearTimeout || clearTimeout
+      const sources = new Map()
+      let disposed = false
+      const empty = (sessionId, status = 'idle') => ({ sessionId, status, records: [], nextCursor: null, health: null, error: '' })
+      function source(sessionId) {
+        const key = typeof sessionId === 'string' && sessionId ? sessionId : null
+        if (sources.has(key)) return sources.get(key)
+        let state = empty(key, disposed ? 'disposed' : key ? 'idle' : 'sessionless')
+        let active = false, closed = disposed, generation = 0, timeout, controller, pages = 1
+        const listeners = new Set()
+        const emit = value => { state = value; for (const listener of [...listeners]) listener() }
+        const cancel = () => { generation++; controller?.abort(); controller = undefined; if (timeout !== undefined) clearTimer(timeout); timeout = undefined }
+        const schedule = () => {
+          if (active && !closed && key) timeout = timer(() => { timeout = undefined; void load('poll') }, options.pollMs || 2500)
+        }
+        async function load(mode = 'refresh') {
+          if (!active || closed || !key) return
+          cancel()
+          const token = generation
+          controller = new AbortController()
+          const signal = controller.signal
+          const current = () => active && !closed && token === generation && !signal.aborted
+          const older = mode === 'older'
+          if (older && state.nextCursor === null) { schedule(); return }
+          if (mode === 'refresh') pages = 1
+          const depth = older ? 1 : pages
+          const before = state
+          emit({ ...state, status: state.health === null ? 'loading' : older ? 'loading-older' : 'refreshing', error: '' })
+          try {
+            let cursor = older ? before.nextCursor : undefined, health, records = older ? [...before.records] : []
+            for (let index = 0; index < depth; index++) {
+              const value = parseHistory(await read({ sessionId: key, ...(cursor === undefined ? {} : { cursor }), limit: 50 }, signal))
+              if (!current()) return
+              if (value.records.some(row => row.sessionId !== key)) throw new Error('Cross-session history response')
+              records.push(...value.records); health = value.health; cursor = value.nextCursor
+              if (cursor === null) break
+            }
+            if (!current()) return
+            const unique = new Map(records.map(row => [row.eventId, row]))
+            records = [...unique.values()].sort((a, b) => b.ledgerSeq - a.ledgerSeq)
+            if (older) pages++
+            emit({ sessionId: key, status: 'ready', records, nextCursor: cursor ?? null, health, error: '' })
+          } catch (error) {
+            if (current()) emit({ ...state, status: 'error', error: HISTORY_ERRORS.has(error?.code) ? error.code : 'history-unavailable' })
+          } finally { if (current()) { controller = undefined; schedule() } }
+        }
+        const entry = {
+          getSnapshot: () => state,
+          subscribe(listener) {
+            if (closed) return () => {}
+            listeners.add(listener)
+            if (!active && key) { active = true; void load('poll') }
+            return () => {
+              listeners.delete(listener)
+              if (!listeners.size) { active = false; cancel(); pages = 1; state = empty(key, key ? 'idle' : 'sessionless') }
+            }
+          },
+          refresh: () => load('refresh'),
+          older: () => load('older'),
+          dispose() { closed = true; active = false; cancel(); emit(empty(key, 'disposed')); listeners.clear() },
+        }
+        sources.set(key, entry)
+        return entry
+      }
+      return { source, dispose() { disposed = true; for (const value of sources.values()) value.dispose() } }
+    }
+    function groupHistory(records) {
+      const groups = new Map()
+      for (const row of records) {
+        let group = groups.get(row.dispatchId)
+        if (!group) { group = { dispatchId: row.dispatchId, rows: [], latest: row }; groups.set(row.dispatchId, group) }
+        group.rows.push(row)
+      }
+      for (const group of groups.values()) group.rows.sort((a, b) => a.ledgerSeq - b.ledgerSeq)
+      // DTO has no whole-session occurrence-uniqueness proof. Page-local counts
+      // cannot authorize inspectCall(callId); show coordinates without navigation.
+      return [...groups.values()]
+    }
+    function outcomeText(row, t) {
+      const key = `history_${row.phase}_${row.outcome}`
+      const label = t(key)
+      return row.phase === 'manual' && row.cause === 'timeout' ? t('historyTimeout') : label === key ? safeText(row.outcome, 80) : label
+    }
+    function historyHealth(health, t) {
+      if (!health) return null
+      const gap = !health.ready || health.gap || health.missingProfile || health.closing || health.writeFailures > 0 || health.readFailures > 0 || health.droppedRecords > 0 || health.corruptRecords > 0
+      return gap ? h('p', { role: 'alert', style: warnStyle }, `${t('historyGap')} · write=${health.writeFailures}, read=${health.readFailures}, dropped=${health.droppedRecords}, corrupt=${health.corruptRecords}${health.lastErrorCode ? ` · ${safeText(health.lastErrorCode, 80)}` : ''}`) : null
+    }
+    function useHistory({ sessionId, useSession, history }) {
+      const session = useSession(value => value)
+      const eligibleId = sessionId && session && !session.blank ? sessionId : null
+      const source = history.source(eligibleId)
+      const state = react.useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
+      return { source, state, blank: !!session?.blank }
+    }
+    function HistoryView(props) {
+      const { source, state, blank } = useHistory(props), t = props.t
+      const groups = groupHistory(state.records)
+      const loading = ['loading', 'refreshing', 'loading-older'].includes(state.status)
+      return h('section', { style: { ...pageStyle, flex: 1, minHeight: 0, overflowY: 'auto', overflowWrap: 'anywhere', boxSizing: 'border-box', width: '100%' } },
+        h('h2', null, t('historyTitle')),
+        h('p', null, t('historyScope')),
+        h('p', null, t('historyExecutionNote')),
+        state.sessionId === null ? h('p', { role: 'status' }, t(blank ? 'historyBlank' : 'historyNoSession')) : h('button', { type: 'button', style: btnStyle, disabled: loading || state.status === 'disposed', onClick: () => source.refresh() }, t('refresh')),
+        loading ? h('p', { role: 'status' }, t('historyLoading')) : null,
+        state.error ? h('p', { role: 'alert' }, `${t('historyFailed')} · ${state.error}`) : null,
+        historyHealth(state.health, t),
+        state.status === 'ready' && !groups.length && state.health.ready && !state.health.gap && !state.health.missingProfile && !state.health.closing ? h('p', { role: 'status' }, t('historyEmpty')) : null,
+        ...groups.map(group => h('article', { key: group.dispatchId, style: cardStyle },
+          h('h3', null, safeText(group.latest.toolName, 160)),
+          h('p', null, `${new Date(group.latest.time).toLocaleString()} · ${t('historyRisk')}: ${safeText(group.rows.find(row => row.risk)?.risk, 20) || t('historyUnknown')}`),
+          h('p', null, `${t('historyRoute')}: ${safeText(group.rows.find(row => row.route)?.route, 160) || t('historyUnknown')}`),
+          h('p', null, `${t('historyLocation')}: ${Number.isInteger(group.latest.turn) ? group.latest.turn : '?'} / ${Number.isInteger(group.latest.step) ? group.latest.step : '?'} · ${safeText(group.latest.callId, 160) || t('historyUnlinked')}`),
+          h('ol', null, ...group.rows.map(row => h('li', { key: row.eventId },
+            h('strong', null, `${t('historyPhase_' + row.phase)}: ${outcomeText(row, t)}`),
+            h('span', null, ` · ${new Date(row.time).toLocaleString()}`),
+            row.reasonSummary ? h('span', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, ` — ${safeText(row.reasonSummary)}`) : null,
+            row.cause ? h('span', null, ` · cause: ${safeText(row.cause, 80)}`) : null,
+            row.deadlineAt !== undefined ? h('span', null, ` · deadline: ${new Date(row.deadlineAt).toLocaleString()}`) : null,
+          ))),
+          h('p', null, `dispatchId: ${safeText(group.dispatchId, 160)} · callEventSeq: ${Number.isInteger(group.latest.callEventSeq) ? group.latest.callEventSeq : t('historyUnknown')}`),
+          h('p', null, `rootCallId: ${safeText(group.latest.rootCallId, 200) || t('historyUnlinked')} · parentCallId: ${safeText(group.latest.parentCallId, 200) || t('historyUnknown')} · subCallId: ${safeText(group.latest.subCallId, 200) || t('historyUnknown')}`),
+          h('span', null, t('historyUnlinked')),
+        )),
+        state.nextCursor !== null ? h('button', { type: 'button', style: btnStyle, disabled: loading || state.status === 'disposed', onClick: () => source.older() }, t('historyOlder')) : null,
+      )
+    }
+    function HistoryDock(props) {
+      const { state } = useHistory(props), t = props.t
+      if (state.sessionId === null || state.status === 'disposed') return null
+      if (state.error) return h('div', { role: 'alert' }, `${t('historyFailed')} · ${state.error}`)
+      if (state.health === null) return h('div', { role: 'status' }, t('historyLoading'))
+      // A read-only result reminder, not a pending-approval replacement or tool-card badge.
+      const latest = state.records.find(row => ['manual', 'reported-result', 'downstream', 'reviewer'].includes(row.phase))
+      return h('div', { role: 'status', style: { padding: '4px 8px', overflowWrap: 'anywhere' } },
+        latest ? `${safeText(latest.toolName, 160)} · ${t('historyPhase_' + latest.phase)}: ${outcomeText(latest, t)} · ${t('historyExecutionNote')}` : t(state.health.ready && !state.health.gap && !state.health.missingProfile && !state.health.closing ? 'historyEmpty' : 'historyGap'),
+        historyHealth(state.health, t),
+      )
+    }
+
     const name = 'dsh-auto-review-router'
     const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.session']
     function apply(ctx) {
@@ -439,6 +699,35 @@ window.__ModuleLoader__.load({
       if (typeof ctx.effect === 'function') {
         ctx.effect(() => () => { disposed = true }, 'dsh-auto-review-router: dispose client')
       }
+      const abortable = (promise, signal) => new Promise((resolve, reject) => {
+        let timer
+        const cleanup = () => { if (timer !== undefined) clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+        const abort = () => { cleanup(); reject(new Error('History read cancelled')) }
+        if (signal?.aborted) return abort()
+        signal?.addEventListener('abort', abort, { once: true })
+        timer = setTimeout(() => { cleanup(); reject(new Error('History read timed out')) }, 20000)
+        Promise.resolve(promise).then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+      })
+      const readHistory = async (query, signal) => {
+        const request = parseHistoryRequest(query)
+        if (disposed || signal?.aborted) throw new Error('Client disposed or read cancelled')
+        await abortable(mounted, signal)
+        const deadline = Date.now() + 20000
+        for (;;) {
+          if (disposed || signal?.aborted) throw new Error('Client disposed or read cancelled')
+          const service = ctx.get('remote.autoReviewRouter')
+          if (service !== undefined) {
+            if (typeof service.history !== 'function') throw new Error('Host history is unavailable')
+            const value = unwrap(parseHistoryResult(await abortable(service.history(request), signal)), t)
+            if (disposed || signal?.aborted) throw new Error('Client disposed or read cancelled')
+            return parseHistory(value)
+          }
+          if (Date.now() > deadline) throw new Error('Host history mount timed out')
+          await abortable(new Promise(resolve => setTimeout(resolve, 250)), signal)
+        }
+      }
+      const history = createHistoryStore(readHistory)
+      ctx.effect(() => () => history.dispose(), 'dsh-auto-review-router: history sources')
       const call = async (method) => {
         const deadline = Date.now() + 20000
         await mounted
@@ -495,8 +784,24 @@ window.__ModuleLoader__.load({
         console.warn('[dsh-auto-review-router] 探针: settings.plugins.tab 当前未声明，注册内置插件挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
       }
       registerInto('settings.plugins.tab', entry.tabId)
+      ctx.slots.inject('conversation.view', () => ctx.slots.register({
+        name: 'conversation.view', id: 'dsh-guard.approval-history', order: 20,
+        label: () => t('historyTitle'), locale: NS, inject: () => ({ history, t }),
+      }, HistoryView))
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock', id: 'dsh-guard.approval-result', order: 30,
+        locale: NS, inject: () => ({ history, t }),
+      }, HistoryDock))
     }
 
+    exports.statusRemote = statusRemote
+    exports.parseHistoryRequest = parseHistoryRequest
+    exports.parseHistoryRecord = parseHistoryRecord
+    exports.parseHistoryResult = parseHistoryResult
+    exports.createHistoryStore = createHistoryStore
+    exports.groupHistory = groupHistory
+    exports.HistoryView = HistoryView
+    exports.HistoryDock = HistoryDock
     exports.dictionaries = { zh, en }
     exports.validateDraft = validateDraft
     exports.createSettingsIO = createSettingsIO

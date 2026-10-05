@@ -7,6 +7,7 @@
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
+import { createApprovalHistory, parseHistoryRequest, parseHistoryResult } from './approval-history.js'
 export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
@@ -19,7 +20,7 @@ import {
 export const name = 'auto-review-router'
 
 /** sessions 必需：禁止在无法枚举现有 Auto 会话时假定关闭安全。 */
-export const inject = ['approval', 'llm', 'permissionPresets', 'tools', 'sessions']
+export const inject = ['approval', 'llm', 'permissionPresets', 'tools', 'sessions', 'profileContext']
 
 const AUTO_PRESET = 'auto'
 const RUN_CODE_NAME = 'run_code'
@@ -52,6 +53,7 @@ export function queryRouterStatus(ctx, rawConfig) {
       registered: live?.registered === true,
       conflict: live?.conflict === true,
       conflictWarning: live?.conflict === true ? CONFLICT_WARN : null,
+      closeFailed: live?.closeFailed === true,
       error: live?.error ?? null,
     },
     route: describeRoute(config),
@@ -97,15 +99,29 @@ function describeRoute(config) {
   }
 }
 
+// Host/Client 统一形状：client.js 的 parseStatus 与本函数逻辑逐句一致，改动时两边一起改，
+// 互反接受/拒绝样例由 test/status.mjs 回归。
 function parseRouterStatus(value) {
   if (!value || typeof value !== 'object' || value.plugin !== 'dsh-auto-review-router') {
     throw new Error('Invalid auto-review-router status')
   }
-  if (!value.registration || typeof value.registration.registered !== 'boolean' || typeof value.registration.conflict !== 'boolean') {
+  const registration = value.registration
+  if (!registration || typeof registration !== 'object'
+    || typeof registration.observed !== 'boolean' || typeof registration.attempted !== 'boolean'
+    || typeof registration.registered !== 'boolean' || typeof registration.conflict !== 'boolean'
+    || typeof registration.closeFailed !== 'boolean'
+    || (registration.conflictWarning !== null && typeof registration.conflictWarning !== 'string')
+    || (registration.error !== null && typeof registration.error !== 'string')) {
     throw new Error('Invalid auto-review-router status.registration')
   }
   if (!value.route || typeof value.route.source !== 'string') throw new Error('Invalid auto-review-router status.route')
-  if (!value.budget || typeof value.budget.maxContextBytes !== 'number') throw new Error('Invalid auto-review-router status.budget')
+  const budget = value.budget
+  if (!budget || typeof budget !== 'object'
+    || typeof budget.maxContextBytes !== 'number' || typeof budget.historyLimit !== 'number'
+    || typeof budget.timeoutMs !== 'number' || typeof budget.temperature !== 'number'
+    || typeof budget.logDecisions !== 'boolean') {
+    throw new Error('Invalid auto-review-router status.budget')
+  }
   return value
 }
 
@@ -131,7 +147,25 @@ export const routerStatusRemote = {
       parameters: [],
       result: statusCodec('dsh-auto-review-router#RouterStatus', parseRouterStatus),
     },
+    {
+      id: 'dsh-auto-review-router#autoReviewRouter/history',
+      service: 'autoReviewRouter',
+      namespace: 'autoReviewRouter',
+      method: 'history',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'request', wire: 'request', source: 'json',
+        codec: statusCodec('dsh-auto-review-router#ApprovalHistoryRequest', parseHistoryRequest) }],
+      result: statusCodec('dsh-auto-review-router#ApprovalHistoryResult', parseHistoryResult),
+    },
   ],
+}
+
+/** Read-only business DTO; no Agent lookup and no cold-session activation. */
+export async function queryApprovalHistory(ctx, request) {
+  const live = runtimeByCtx.get(ctx)
+  if (!live?.history) return { ok: false, error: { code: 'history-unavailable', message: '审批历史暂不可用。' } }
+  try { return await live.history.history(request) }
+  catch { return { ok: false, error: { code: 'history-unavailable', message: '审批历史暂不可用。' } } }
 }
 
 const runtimeByCtx = new WeakMap()
@@ -158,8 +192,12 @@ class RouterStatusRemote {
   read() {
     throw new Error('autoReviewRouter.read 未绑定')
   }
+  history(request) {
+    throw new Error('autoReviewRouter.history 未绑定')
+  }
 }
 markDirectRemote(RouterStatusRemote.prototype, 'read')
+markDirectRemote(RouterStatusRemote.prototype, 'history')
 
 function exposeRouterRemote(ctx) {
   try {
@@ -172,6 +210,9 @@ function exposeRouterRemote(ctx) {
     })
     service.read = function read() {
       return queryRouterStatus(ctx)
+    }
+    service.history = function history(request) {
+      return queryApprovalHistory(ctx, request)
     }
     if (typeof ctx.reflect?.provide === 'function') {
       ctx.reflect.provide('autoReviewRouter', service)
@@ -202,10 +243,24 @@ function exposeRouterRemote(ctx) {
   }
 }
 
-export function apply(ctx, rawConfig) {
+/**
+ * historyOptions 是测试专用的审计存储注入缝（如注入永 pending 的 memory fs 验证
+ * stall 有界性）；运行时 Loader 只传 (ctx, config)，默认真实 fs 与常规界限不变。
+ */
+export function apply(ctx, rawConfig, historyOptions) {
   const readConfig = () => normalizeConfig(rawConfig)
-  const snap = { readConfig, attempted: false, registered: false, conflict: false, error: null }
+  const history = createApprovalHistory(ctx, historyOptions)
+  const snap = { readConfig, history, attempted: false, registered: false, conflict: false, closeFailed: false, error: null }
   runtimeByCtx.set(ctx, snap)
+  const offHistorySession = ctx.on?.('session/event', (session, event) => history.sessionEvent(session, event))
+  const offHistoryResult = ctx.on?.('tools/result', (exec, result) => history.result(exec, result))
+  // Registered BEFORE registerAuto/shutdown: Cordis reverse teardown drains the
+  // safety generation first, then flushes and removes these passive observers.
+  ctx.effect?.(() => async () => {
+    await history.close()
+    callDisposer(offHistorySession)
+    callDisposer(offHistoryResult)
+  }, 'auto-review-router 审批历史排空')
   exposeRouterRemote(ctx)
   ctx.inject?.(['settings'], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
@@ -214,7 +269,14 @@ export function apply(ctx, rawConfig) {
   let closed = false
   let guard
 
-  const stop = () => {
+  /**
+   * 停止当前准入代。final=false（热关闭，fiber 还活着）：收紧失败时保留现有 live
+   * guard/Auto 注册，报错供下一次 reconcile 重试。final=true（fiber 卸载）：宿主
+   * 强制排空不受插件控制——Cordis 会继续移除 guard 监听与调用方所属的 registerAuto
+   * effect（官方 README 声明的强析构极限，无公开 API 可阻止），因此失败后只能如实
+   * 上报 closeFailed，不得再声称守卫仍保留。
+   */
+  const stop = (final = false) => {
     if (!generation) return
     const previous = generation
     previous.accepting = false
@@ -222,6 +284,13 @@ export function apply(ctx, rawConfig) {
     // Narrow file access only: never call presets.set(), which also changes approval.
     try { migrateAutoSessions(ctx) }
     catch (error) {
+      if (final) {
+        generation = undefined
+        snap.registered = false
+        snap.closeFailed = true
+        snap.error = `安全关闭失败：宿主强制卸载可能已移除审查守卫与 Auto 注册，而会话权限未被收紧（仍保持原有模式）；请人工收紧相关会话为只读：${errorMessage(error)}`
+        throw new Error(snap.error, { cause: error })
+      }
       snap.error = `安全关闭失败，Auto 注册与拒绝守卫仍保留：${errorMessage(error)}`
       throw new Error(snap.error, { cause: error })
     }
@@ -230,6 +299,7 @@ export function apply(ctx, rawConfig) {
     callDisposer(guard)
     guard = undefined
     snap.registered = false
+    snap.closeFailed = false
     snap.error = null
   }
   const reconcile = () => {
@@ -247,7 +317,7 @@ export function apply(ctx, rawConfig) {
         if (exec?.agent && ctx.permissionPresets.current(exec.agent.session) === AUTO_PRESET) return { kind: 'cancel' }
         return next()
       }
-      return reviewGate(ctx, readConfig(), state, exec, next)
+      return reviewGate(ctx, readConfig(), state, exec, next, history)
     }, { prepend: true })
     const state = { accepting: true, active: new Set(), lifecycle: new AbortController(), warnedCwd: false, warnedHistory: false }
     snap.attempted = true
@@ -278,13 +348,18 @@ export function apply(ctx, rawConfig) {
     if (closed) return
     closed = true
     const pending = generation ? [...generation.active] : []
-    stop()
+    // 收紧失败不能跳过在途取消与审计排空；状态由 stop(final=true) 如实记录。
+    // 继续抛出让 Cordis 记录该 effect 失败；宿主仍会继续强制排空其余 effect。
+    let stopError
+    try { stop(true) } catch (error) { stopError = error }
     await Promise.allSettled(pending)
+    await history.drain()
     callDisposer(guard)
+    if (stopError) throw stopError
   }
   reconcile()
 }
-async function reviewGate(ctx, config, state, exec, next) {
+async function reviewGate(ctx, config, state, exec, next, history) {
   if (exec?.agent == null) return next()
   let preset
   try {
@@ -293,39 +368,116 @@ async function reviewGate(ctx, config, state, exec, next) {
     return failed(exec.name, error)
   }
   if (preset !== AUTO_PRESET) return next()
-  if (!config.enabled || !state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) {
+  const entry = history.begin(exec)
+  const cancelled = () => !state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted
+  if (!config.enabled || cancelled()) {
+    history.record(entry, 'reviewer', 'cancel', { cause: 'admission-closed' })
     return { kind: 'cancel' }
   }
-  // 外层 PTC 仅在健康启用时豁免审查；关闭失败或中止状态不能绕过拒绝守卫。
-  if (exec.parent === undefined && exec.name === RUN_CODE_NAME) return next()
+  // 外层 PTC 仅在健康启用时豁免审查；保留 token 映射供并发子调用关联。
+  if (exec.parent === undefined && exec.name === RUN_CODE_NAME) {
+    const downstream = await next()
+    if (entry) entry.coreAsk = downstream?.kind === 'ask'
+    history.record(entry, 'downstream', downstream?.kind ?? 'failure', { cause: 'ptc-transport' })
+    return cancelled() ? { kind: 'cancel' } : downstream
+  }
 
   const ticket = Promise.withResolvers()
   state.active.add(ticket.promise)
   const started = Date.now()
-  let routeLabel = 'unresolved'
+  let routeLabel = 'unresolved', stage = 'reviewer'
   try {
     const signal = combineSignals(exec.signal, state.lifecycle.signal, config.timeoutMs)
     const outcome = await bounded(classify(ctx, config, state, exec, signal), signal)
-    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
-    routeLabel = outcome.routeLabel
-    logDecision(ctx, config, exec.name, routeLabel, outcome.decision.risk, outcome.decision.decision, started)
-    if (outcome.decision.decision === 'allow') {
-      const downstream = await next()
-      if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
-      return downstream
+    if (cancelled()) {
+      history.record(entry, 'reviewer', 'cancel', { cause: 'caller-or-lifecycle' })
+      return { kind: 'cancel' }
     }
-    if (approvalPolicy(ctx, exec.agent.session) === 'never') return denied(exec.name, outcome.decision.reason)
+    routeLabel = outcome.routeLabel
+    history.record(entry, 'reviewer', outcome.decision.decision, { risk: outcome.decision.risk,
+      route: routeLabel, reasonSummary: outcome.decision.reason, durationMs: Date.now() - started })
+    logDecision(ctx, config, exec.name, routeLabel, outcome.decision.risk, outcome.decision.decision, started)
+    if (cancelled()) return { kind: 'cancel' }
+    if (outcome.decision.decision === 'deny'
+      && (approvalPolicy(ctx, exec.agent.session) === 'never' || config.manualFallback === false)) {
+      return denied(exec.name, outcome.decision.reason)
+    }
+    stage = 'downstream'
     const downstream = await next()
-    if (state.lifecycle.signal.aborted) return { kind: 'cancel' }
-    if (downstream?.kind !== 'allow') return downstream
-    return askUser(exec.name, outcome.decision.reason)
+    if (entry) entry.coreAsk = downstream?.kind === 'ask'
+    history.record(entry, 'downstream', downstream?.kind ?? 'failure', {
+      ...(downstream?.kind === 'ask' ? { cause: 'handed-to-core-approval' } : {}) })
+    if (cancelled()) return { kind: 'cancel' }
+    // Never overrule an existing gate's deny/cancel/ask. An ask belongs to Core.
+    if (downstream?.kind !== 'allow' || outcome.decision.decision === 'allow') return downstream
+    stage = 'manual'
+    return await manualFallback(ctx, config, state, exec, outcome.decision, history, entry)
   } catch (error) {
-    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+    if (cancelled()) {
+      history.record(entry, stage === 'manual' ? 'manual' : stage, stage === 'manual' ? 'cancelled' : 'cancel', { cause: 'caller-or-lifecycle' })
+      return { kind: 'cancel' }
+    }
+    history.record(entry, stage === 'manual' ? 'manual' : stage, stage === 'manual' ? 'unavailable' : 'failure', { cause: `${stage}-failed` })
     logDecision(ctx, config, exec.name, routeLabel, 'failed', 'deny', started)
     return failed(exec.name, error)
   } finally {
     state.active.delete(ticket.promise)
     ticket.resolve()
+  }
+}
+
+async function manualFallback(ctx, config, state, exec, decision, history, entry) {
+  const { risk, reason } = decision
+  // effectivePolicy includes the configured default; overrideOf alone can miss never.
+  if (approvalPolicy(ctx, exec.agent.session) === 'never') return denied(exec.name, reason)
+  if (typeof ctx.approval?.request !== 'function') {
+    history.manualOutcome(entry, 'unavailable')
+    return denied(exec.name, 'official approval channel unavailable')
+  }
+  const ms = Number.isInteger(config.manualApprovalTimeoutMs) && config.manualApprovalTimeoutMs >= 1000
+    && config.manualApprovalTimeoutMs <= 300000 ? config.manualApprovalTimeoutMs : 60000
+  const controller = new AbortController()
+  const removers = []
+  const abort = cause => {
+    if (controller.signal.aborted) return
+    if (entry) entry.abortCause = cause
+    controller.abort(new Error(`auto-review approval ${cause}`))
+  }
+  for (const [signal, cause] of [[exec.signal, 'caller'], [state.lifecycle.signal, 'lifecycle']]) {
+    if (!signal) continue
+    const listener = () => abort(cause)
+    signal.addEventListener('abort', listener, { once: true })
+    removers.push(() => signal.removeEventListener('abort', listener))
+    if (signal.aborted) listener()
+  }
+  if (entry) entry.deadlineAt = Date.now() + ms
+  const deadlineMono = performance.now() + ms
+  const seconds = Math.ceil(ms / 1000)
+  const timer = setTimeout(() => abort('timeout'), ms)
+  try {
+    const response = await history.invokeManual(entry, () => ctx.approval.request({
+      agent: exec.agent, toolName: exec.name, callId: exec.callId,
+      reason: askUser(exec.name, reason).reason,
+      displayReason: {
+        en: `Automatic review classified this as ${risk} risk. Allow once? No response within ${seconds} seconds means rejection.`,
+        zh: `自动审批判断为${risk === 'high' ? '高危' : '中风险'}操作，是否放行？${seconds}秒未响应自动拒绝。`,
+      },
+      signal: controller.signal,
+    }))
+    // Settle the request deadline BEFORE any audit I/O. A delayed event loop
+    // cannot admit a late grant merely because its timer has not run yet.
+    if (performance.now() >= deadlineMono) abort('timeout')
+    clearTimeout(timer)
+    const outcome = ['allowed-once', 'rejected', 'cancelled', 'unavailable'].includes(response) ? response : 'unavailable'
+    const final = controller.signal.aborted ? 'cancelled' : outcome
+    history.manualOutcome(entry, final)
+    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+    if (final === 'allowed-once') return { kind: 'allow' }
+    return denied(exec.name, final === 'cancelled' && entry?.abortCause === 'timeout'
+      ? 'manual approval timed out' : `manual approval ${final}`)
+  } finally {
+    clearTimeout(timer)
+    for (const remove of removers) remove()
   }
 }
 
@@ -458,11 +610,13 @@ function failed(toolName, error) {
 }
 
 function approvalPolicy(ctx, session) {
-  if (typeof ctx.approval?.overrideOf !== 'function') return 'ask'
   try {
-    return ctx.approval.overrideOf(session) === 'never' ? 'never' : 'ask'
+    const policy = typeof ctx.approval?.effectivePolicy === 'function'
+      ? ctx.approval.effectivePolicy(session) : ctx.approval?.overrideOf?.(session)
+    return policy === 'never' ? 'never' : 'ask'
   } catch {
-    return 'ask'
+    // A policy lookup failure cannot open a new manual approval channel.
+    return 'never'
   }
 }
 

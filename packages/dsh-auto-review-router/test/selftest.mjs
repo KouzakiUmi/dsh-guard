@@ -244,7 +244,7 @@ function decisionStream(text, extraChunks = []) {
  */
 function fakeCtx(options = {}) {
   const listeners = []
-  const calls = { registerAuto: 0, stream: 0, info: [], warn: [] }
+  const calls = { registerAuto: 0, stream: 0, info: [], warn: [], approvals: [] }
   const ctx = {
     listeners,
     calls,
@@ -255,6 +255,10 @@ function fakeCtx(options = {}) {
     approval: {
       overrideOf() {
         return options.policy ?? 'ask'
+      },
+      async request(request) {
+        calls.approvals.push(request)
+        return options.manualResponse ?? 'rejected'
       },
     },
     permissionPresets: {
@@ -395,18 +399,22 @@ await checkAsync('审查失败 fail-closed：超时', async () => {
   assert(String(result.reason).includes('failed'), result.reason)
 })
 
-await checkAsync('deny + ask → 返回 kind: ask', async () => {
-  const { result, nextCalls } = await gate({
+await checkAsync('deny + ask → 官方人工请求，拒绝不放行', async () => {
+  const { ctx, result, nextCalls } = await gate({
     policy: 'ask',
     stream() {
       return decisionStream('{"risk":"medium","decision":"deny","reason":"target not authorized"}')
     },
   })
-  assert(result.kind === 'ask', `期望 ask，实际 ${result.kind}`)
-  assert(nextCalls === 1, 'ask 分支应先询问下游')
-  assert(String(result.reason).includes('target not authorized'), result.reason)
-  assert(result.displayReason?.zh?.includes('Auto review 拒绝了此调用'), result.displayReason?.zh)
-  assert(typeof result.displayReason?.en === 'string', '缺少英文 displayReason')
+  assert(result.kind === 'deny', `期望 deny，实际 ${result.kind}`)
+  assert(nextCalls === 1, '人工分支应先询问下游')
+  assert(ctx.calls.approvals.length === 1, '必须使用官方 request')
+  const request = ctx.calls.approvals[0]
+  assert(String(request.reason).includes('target not authorized'), request.reason)
+  assert(request.displayReason?.zh?.includes('中风险'), request.displayReason?.zh)
+  assert(request.displayReason?.zh?.includes('60秒未响应自动拒绝'), request.displayReason?.zh)
+  assert(typeof request.displayReason?.en === 'string', '缺少英文 displayReason')
+  assert(request.signal instanceof AbortSignal, '必须向官方审批传请求级取消信号')
 })
 
 await checkAsync('deny + never → 返回 kind: deny', async () => {

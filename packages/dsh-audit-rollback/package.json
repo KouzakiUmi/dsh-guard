@@ -1,7 +1,7 @@
 {
   "name": "dsh-audit-rollback",
   "displayName": "审计与回滚（audit ledger + rollback）",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "description": "Persistent audit ledger + precise rollback for DeepSeek Harness file-tool edits: capture pre-edit bytes into a content-addressed store per turn, roll back offline via a standalone CLI.",
   "type": "module",
@@ -26,12 +26,14 @@
     "lib/client.js",
     "lib/ledger.js",
     "lib/config.js",
+    "lib/rollback-preview.js",
+    "lib/rollback-remote.js",
     "scripts/audit-rollback.mjs",
     "cordis.patch.yml",
     "README.zh.md"
   ],
   "scripts": {
-    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/settings-client.mjs && node test/settings-integration.mjs"
+    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/settings-client.mjs && node test/settings-integration.mjs && node test/rollback-integration.mjs && node test/rollback-preview.mjs && node test/rollback-ui.mjs && node test/security-regressions.mjs"
   },
   "repository": {
     "type": "git",
@@ -66,6 +68,7 @@
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-settings-plugins",
         "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-api-remotes"
       ]
     }

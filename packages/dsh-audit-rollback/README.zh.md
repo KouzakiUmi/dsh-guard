@@ -5,16 +5,18 @@
 ## 能力
 
 - **编辑前捕获**：`write` / `edit` / `str_replace_editor`（可配）调用前捕获目标文件原始字节进 CAS（SHA-1 寻址，同内容只存一份）。
-- **逐轮审计账本**：`turn/start`、`call`（工具名 + 参数哈希 + 截断预览）、`capture/before|after`、`turn/end`、`rollback`、`note` 六类条目，按 UTC 日期分文件，append-only。
-- **精确回滚**：独立 CLI 按会话 + 轮次回滚——已存在的文件从 CAS 恢复、新建的文件收进回收站；轮后被改动过的文件默认 skip，`--force` 才覆盖；dry-run 为默认，`--apply` 才真正动手。
+- **逐轮审计账本**：`turn/start`、`call`（工具名 + 参数哈希 + 截断预览）、`capture/before|after`、`turn/end`、`rollback`、`note` 六类条目，按 UTC 日期分文件，append-only。权威 `after` 只在 `turn/end` 采集；`agent/turn-stopping` 不写 after——stopping 之后核心仍可继续落盘，提前采集会把后像记成中间态；没有 `turn/end` 的轮次恢复侧一律以 `TURN_NOT_ENDED` 拒绝（fail-closed）。
+- **CLI 回滚**：独立 CLI 按会话 + 轮次回滚——已存在的文件从 CAS 恢复、新建的文件收进回收站；轮后被改动过的文件默认 skip，`--force` 才覆盖；dry-run 为默认，`--apply` 才真正动手。
+- **会话内文件恢复（开发树实现）**：会话「已修改文件」视图列出摘要，逐项打开预览并二次确认；只有完整前后捕获、轮次已结束、当前哈希/对象、会话与路径身份均匹配且确认票据未过期时才可恢复。预览 nonce 有效期 120 秒，恢复请求不接受任意 path/force。三个方法调用前都经 Host `sessionController.inspect` 只读核实会话存在（不激活、不 resume Agent/模型），restore 另要求该会话无进行中的轮（`agents` 状态非 running）；session/agents 服务缺失或读取失败一律按 `SESSION_VERIFIER_UNAVAILABLE` 拒绝，不静默放行。Windows 上同一文件的大小写别名路径（如 `target.txt` / `TARGET.TXT`）按小写键归并判定，任一别名被其它会话或更晚轮次捕获即拒绝恢复。该功能未宣称已发布或通过真实 GUI 验收。
 - **可编辑设置页**：零构建手写 client，唯一入口 `settings.plugins.tab`（设置→内置插件）；支持编辑、保存、取消并重新读取、字段校验、保存结果与 revision 冲突提示。配置持久化只使用官方 Settings/ConfigEditor；存储层和 CLI 仍只用 Node 内建模块。
 - **官方 Config schema**：Host 依赖 peer `@deepseek-ai/schemastery ~3.18.5-alpha.1`，五个可编辑字段声明 `.volatile()`，运行时读取 `.get()`。
 
 ## 限制（明确不做）
 
 - **不做**实时 UI 内撤销按钮；回滚只走 CLI。
-- **GUI 无回滚按钮**：设置页可以查看与设置捕获策略；实际回滚仍走独立 CLI。
-- **不捕获** shell / 命令行 / 其它插件 / 人工编辑造成的文件改动——只覆盖文件工具（`write` / `edit` / `str_replace_editor`）在 `arguments` 里显式给出的路径；轮后被插件外手段改动的文件，undo 会按「轮后已被改动」skip 保护。
+- **GUI 不提供无确认撤销**：文件视图只显示变化摘要与差异预览，恢复操作必须另行确认；设置页不是回滚入口。
+- **不捕获** shell / 命令行 / 其它插件 / 人工编辑造成的文件改动——只覆盖文件工具（`write` / `edit` / `str_replace_editor`）在 `arguments` 里显式给出的路径；轮后被插件外手段改动的文件会因哈希/身份或后续捕获检查而拒绝恢复。
+- 文件视图的 diff 是首个前像到当前内容的对比，不保证等于完整会话 netdiff；捕获仅说明观察到工具目标，不证明工具 body 实际执行或成功。仅有旧版 pre-image 的记录不能安全恢复。纯 Node 路径检查无法消除恶意并发路径交换的全部 TOCTOU 风险，不能宣传为针对恶意同机写入者的安全边界。
 - **不做**影子 git 快照：`gitSnapshot` 不进入可编辑表单，不提供样子开关；旧 profile 的 `true` 保留告警和 note 兼容行为，不代表实现了 git 快照。
 - **不保证**目录结构变化的回滚（只跟踪文件路径）；删除整目录等操作不在捕获范围。
 - **不捕获**识别不出目标路径的工具调用（`call` 条目照记，`targets` 为空）。
@@ -98,16 +100,24 @@ node scripts/audit-rollback.mjs last     [--state <dir>] [--apply] [--force] [--
 5. **一致性判定的参照**（契约第 7 节，2026-10-04 修正）：参照 = 该轮的 `after`（该轮没有 `after` 才退到该轮 `before`）；该路径在后续轮次另有捕获也视为不一致（skip「轮后已被改动」），只有 `--force` 才执行；`show` 与 `undo` 共用同一判定函数，两处结论一致。参照条目无哈希（超限捕获）时退化为比字节数。
 6. **CLI 扩展**：`undo` 子命令额外接受 `--json`（契约只给 `last` 列了 `--json`），属超集扩展，不改变既定退出码语义。
 7. **部署未执行**：本次仅工作区开发与隔离测试；真实 GUI 的渲染、点击和已安装副本更新未验证，不从离线通过推断当前页面已更新。
+8. **回滚安全边界（2026-10-05 复核声明）**：纯 JS 路径校验无法消除恶意并发 TOCTOU 风险。Windows Node 24 的 `constants.O_NOFOLLOW` 为 undefined，没有 OS 级 no-follow 保护，防重入只靠 fd 身份比对与 nlink 检查。symlink 创建在本机 Windows 测试环境 EPERM，文件 symlink 用例只能 SKIP（junction/hardlink 用例已真跑）。备份与 intent 目前只对目标文件 fsync，崩溃/断电/DACL 场景下的恢复完整性未验证。
 
 ## 自测
 
 ```powershell
-node test/selftest.mjs       # 离线存储层 + CLI 断言（CAS 去重 / before 去重 / 回滚 / append-only / trash 防覆盖 / CLI --force 等 11 条）
-node test/plugin-smoke.mjs   # 假 ctx 桩冒烟：apply 不抛错 + 4 个事件注册 + 一轮事件流落账（含 before 哈希断言）
-node test/status.mjs         # 假 ctx 调用只读状态：账本 / objects / capture / 配置回显
-node test/settings-client.mjs # 零构建 VM 表单交互：编辑、保存、取消、校验、错误、冲突、翻译、状态刷新
-node test/settings-integration.mjs # 真实 Cordis Loader + Settings + ConfigEditor 临时 profile
+node test/selftest.mjs
+node test/plugin-smoke.mjs
+node test/status.mjs
+node test/navigation.mjs
+node test/settings-client.mjs
+node test/settings-integration.mjs
+node test/rollback-integration.mjs
+node test/rollback-preview.mjs
+node test/rollback-ui.mjs
+node test/security-regressions.mjs
 ```
+
+`tools/verify.mjs` 自动枚举此目录下的测试 `.mjs`；`bootstrap.mjs` 是辅助加载器，不作为测试运行。`package.json` 的 `scripts.test` 显式列出上述 10 项。发布运行清单仅含 package manifest、README、patch、`lib/index.js`、`lib/client.js`、`lib/config.js`、`lib/ledger.js`、`lib/rollback-preview.js`、`lib/rollback-remote.js` 与 `scripts/audit-rollback.mjs`；测试文件不随包发布。
 
 测试数据写在包内测试临时目录或系统 mkdtemp，并在 finally 清理，不写真实 `~/.dsh`。集成测试验证原 fiber 不卸载、官方持久化与失败不写入、实时配置改变下一轮实际捕获，以及旧轮次 before/after 固定快照。client 交互是 VM hook/元素测试，不等同真实浏览器可视验收。
 

@@ -10,10 +10,10 @@ export const HISTORY_ITEM_MAX_BYTES = 2000
 export const TRUNCATION_SUFFIX = '…[truncated]'
 
 /**
- * 送进 reviewer 的固定策略。允许即立即以完全主机权限执行，没有后续确认。
+ * 送进 reviewer 的固定策略。允许仅继续下游门控，不代表最终准入或执行。
  * @type {string}
  */
-export const REVIEW_POLICY = `You are the one-shot authorization reviewer for a single pending tool call, and nobody else will confirm it. Your verdict stands in for a human approval. If you allow the call, the host runs it at once with unrestricted host access and will not ask again.
+export const REVIEW_POLICY = `You are the one-shot automatic authorization reviewer for a single pending tool call that may have broad host access. Your verdict is one gate, not proof of final permission or execution. An allow only continues to downstream approval, sandbox guards and cancellation checks. A deny may be escalated by the host to a time-limited human request only when the effective approval policy permits it; do not anticipate that possibility by relaxing your automatic verdict.
 
 Reply with one JSON object and nothing else. Do not add Markdown, labels, explanations, or a second object.
 

@@ -22,6 +22,8 @@ const REQUIRED_FILES = {
 		"lib/client.js",
 		"lib/config.js",
 		"lib/ledger.js",
+		"lib/rollback-preview.js",
+		"lib/rollback-remote.js",
 		"scripts/audit-rollback.mjs",
 	],
 	"dsh-auto-review-router": [
@@ -33,6 +35,7 @@ const REQUIRED_FILES = {
 		"lib/config.js",
 		"lib/policy.js",
 		"lib/context.js",
+		"lib/approval-history.js",
 	],
 };
 

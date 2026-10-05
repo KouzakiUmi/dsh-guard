@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 import './runtime.mjs'
 const { apply, queryRouterStatus, routerStatusRemote } = await import('../lib/index.js')
 
@@ -179,6 +180,47 @@ ok('client 设置页注册契约：仅内置插件页签，无独立侧栏入口
   assert.equal(client.includes('退回 settings.section'), false, '旧的 try/catch 回退路径必须删除')
   // apply 入口必须有加载日志，否则「没出现且无报错」无法定位。
   assert.ok(client.includes("console.info('[dsh-auto-review-router] client 已加载')"), '缺 apply 入口日志')
+})
+
+ok('status codec Host/Client 互反一致：接受值双方同接受，拒绝值双方同拒绝', () => {
+  let clientExports
+  vm.runInNewContext(readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8'), {
+    window: { __ModuleLoader__: { load({ factory }) { clientExports = factory(() => ({ createElement() {} })) } } },
+    console: { info() {}, warn() {}, error() {} }, setTimeout, clearTimeout, AbortController, Date, Promise,
+  })
+  const clientParse = clientExports.statusRemote.descriptors[0].result.schema.parse
+  const hostParse = routerStatusRemote.descriptors[0].result.schema.parse
+  const observedCtx = fakeCtx(() => () => {})
+  apply(observedCtx, { enabled: false })
+  const accepts = [
+    queryRouterStatus(observedCtx), // 已观察：observed/attempted/registered/conflict/closeFailed 全 false
+    queryRouterStatus({ config: { enabled: true } }), // 未观察：registration 仍为完整布尔形状
+  ]
+  const valid = accepts[0]
+  const reject = (label, mutate) => {
+    const value = JSON.parse(JSON.stringify(valid))
+    mutate(value)
+    return [label, value]
+  }
+  const rejects = [
+    reject('缺 registration.conflict（旧 client 曾不查）', value => { delete value.registration.conflict }),
+    reject('缺 registration.closeFailed', value => { delete value.registration.closeFailed }),
+    reject('缺 budget.timeoutMs（旧 host 曾不查）', value => { delete value.budget.timeoutMs }),
+    reject('registration.observed 非布尔', value => { value.registration.observed = 'yes' }),
+    reject('registration.conflictWarning 非 string|null', value => { value.registration.conflictWarning = 42 }),
+    reject('registration.error 非 string|null', value => { value.registration.error = 42 }),
+    reject('缺 budget.logDecisions', value => { delete value.budget.logDecisions }),
+    reject('route.source 非字符串', value => { value.route.source = 1 }),
+    reject('plugin 名不符', value => { value.plugin = 'other' }),
+  ]
+  for (const value of accepts) {
+    assert.deepEqual(JSON.parse(JSON.stringify(hostParse(JSON.parse(JSON.stringify(value))))), JSON.parse(JSON.stringify(value)), 'host 必须接受合法 status')
+    assert.deepEqual(JSON.parse(JSON.stringify(clientParse(JSON.parse(JSON.stringify(value))))), JSON.parse(JSON.stringify(value)), 'client 必须接受合法 status')
+  }
+  for (const [label, value] of rejects) {
+    assert.throws(() => hostParse(value), undefined, `host 必须拒绝：${label}`)
+    assert.throws(() => clientParse(value), undefined, `client 必须拒绝：${label}`)
+  }
 })
 
 if (failed > 0) {

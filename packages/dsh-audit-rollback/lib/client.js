@@ -161,6 +161,38 @@ window.__ModuleLoader__.load({
       ],
     }
 
+    // Keep the same strict descriptor/remote metadata path as the status service.
+    function parseRollbackRequest(method, value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_REQUEST')
+      const fields = method === 'changedFiles' ? ['sessionId', 'cursor', 'limit', 'turn'] : method === 'preview' ? ['sessionId', 'entryId'] : ['sessionId', 'entryId', 'nonce', 'expectedCurrentHash']
+      if (Object.keys(value).some((key) => !fields.includes(key))) throw new Error('UNEXPECTED_REQUEST_FIELD')
+      if (typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId === 'unknown' || value.sessionId.length > 512) throw new Error('INVALID_SESSION')
+      if (method === 'changedFiles') {
+        for (const key of ['cursor', 'limit', 'turn']) if (value[key] !== undefined && !Number.isSafeInteger(value[key])) throw new Error('INVALID_PAGE')
+        if ((value.cursor ?? 0) < 0 || (value.limit ?? 25) < 1 || (value.limit ?? 25) > 100) throw new Error('INVALID_PAGE')
+      } else {
+        if (!/^entry-[a-f0-9]{64}$/.test(value.entryId || '')) throw new Error('INVALID_ENTRY_ID')
+        if (method === 'restore' && (!/^[a-f0-9-]{36}$/.test(value.nonce || '') || !/^(absent|[a-f0-9]{40})$/.test(value.expectedCurrentHash || ''))) throw new Error('INVALID_PREVIEW_BINDING')
+      }
+      return value
+    }
+    function parseRollbackResult(method, value) {
+      if (!value || typeof value !== 'object' || typeof value.sessionId !== 'string') throw new Error('INVALID_ROLLBACK_RESULT')
+      if (method === 'changedFiles' && (!Array.isArray(value.rows) || !Number.isSafeInteger(value.total))) throw new Error('INVALID_FILE_LIST')
+      if (method === 'preview' && (typeof value.entryId !== 'string' || typeof value.canRestore !== 'boolean' || !value.diff || typeof value.diff.text !== 'string')) throw new Error('INVALID_PREVIEW')
+      if (method === 'restore' && (typeof value.applied !== 'boolean' || typeof value.recorded !== 'boolean' || typeof value.operationId !== 'string')) throw new Error('INVALID_RECEIPT')
+      return value
+    }
+    const rollbackMethods = ['changedFiles', 'preview', 'restore']
+    const rollbackCodec = (typeSymbol, parse) => ({ mode: 'strict', typeSymbol, schema: { parse }, create: () => ({ parse }) })
+    const rollbackDescriptors = rollbackMethods.map((method) => ({
+      id: 'dsh-audit-rollback#auditRollback/' + method,
+      service: 'auditRollback', namespace: 'auditRollback', method, invocation: { kind: 'direct' },
+      parameters: [{ name: 'request', wire: 'request', source: 'json', codec: rollbackCodec('dsh-audit-rollback#' + method + ':request', (v) => parseRollbackRequest(method, v)) }],
+      result: rollbackCodec('dsh-audit-rollback#' + method + ':result', (v) => parseRollbackResult(method, v)),
+    }))
+    statusRemote.descriptors.push(...rollbackDescriptors)
+
     const pageStyle = { padding: 16, maxWidth: 760, font: '13px/1.55 sans-serif' }
     const cardStyle = { marginTop: 14, padding: 12, border: '1px solid rgba(128,128,128,.28)', borderRadius: 10 }
     const btnStyle = { padding: '6px 12px', borderRadius: 8, border: '1px solid rgba(128,128,128,.4)', background: 'transparent', cursor: 'pointer' }
@@ -351,6 +383,141 @@ window.__ModuleLoader__.load({
       )
     }
 
+    const reasonText = {
+      DISCONTINUOUS_CAPTURE_HISTORY: '轮次间捕获不连续，不能覆盖未捕获的修改', INCOMPLETE_CAPTURE_IDENTITY: '中间捕获缺路径身份',
+      UNCAPTURED_TOOL_TARGET: '存在未捕获工具目标，历史不完整', AMBIGUOUS_TURN_CAPTURE: '轮次捕获歧义，不能恢复', INVALID_CAPTURE_FACT: '捕获记录无效',
+      NO_PREIMAGE: '没有前像，不能恢复', PREIMAGE_ONLY_NO_POSTIMAGE: '只有前像：不能证明工具已执行或成功，不能恢复',
+      INCOMPLETE_TURN_CAPTURE: '部分轮次缺后像，不能恢复', TURN_NOT_ENDED: '捕获轮次尚未结束', ACTIVE_SESSION_TURN: '会话正在运行，禁止恢复',
+      LEGACY_CAPTURE_NO_PATH_IDENTITY: '旧账本没有路径身份证据，仅可查看', BASELINE_ANCESTOR_CHANGED: '前像路径祖先已变更',
+      PATH_IDENTITY_CHANGED: '文件或路径身份已变更', CURRENT_HASH_CONFLICT: '当前文件已被修改，保护后续手改',
+      NEWER_OR_OTHER_SESSION_CAPTURE: '存在后续或其他会话捕获，禁止覆盖', NO_CAPTURED_CHANGE: '捕获前后内容相同（可能拒绝或未执行）',
+      CAS_MISSING_OR_CORRUPT: '前像/后像对象缺失或校验失败', IMAGE_UNAVAILABLE_OR_OVERSIZED: '捕获对象缺失或超限',
+      CURRENT_OVERSIZED: '当前文件超限', UNSAFE_OR_UNREADABLE_PATH: '路径不安全或无法读取（链接、目录等）',
+    }
+    const reasonLabel = (s) => reasonText[s] || s || '—'
+    const changeLabel = (s) => ({ created: '创建', deleted: '删除', modified: '修改', unchanged: '未变化', unknown: '未知（捕获不等于实际修改）' }[s] || s)
+    const captureLabel = (s) => ({ 'not-captured': '未捕获', 'preimage-only': '仅前像', 'before-and-after': '前像与后像', 'incomplete-history': '捕获历史不完整' }[s] || s)
+
+    function ChangedFilesPage({ sessionId, call, running = false }) {
+      const [page, setPage] = react.useState(null)
+      const [selected, setSelected] = react.useState(null)
+      const [confirmation, setConfirmation] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [error, setError] = react.useState('')
+      const [message, setMessage] = react.useState('')
+      const live = react.useRef({ sessionId, epoch: 0, busy: false })
+      if (live.current.sessionId !== sessionId) { live.current.sessionId = sessionId; live.current.epoch++; live.current.busy = false }
+      live.current.running = running
+      const current = (epoch) => live.current.sessionId === sessionId && live.current.epoch === epoch
+      const work = async (fn) => {
+        if (!sessionId || live.current.sessionId !== sessionId || live.current.busy || live.current.running) return
+        const epoch = live.current.epoch
+        live.current.busy = true; setBusy(true); setError(''); setMessage('')
+        try { await fn(epoch) }
+        catch (err) { if (current(epoch)) setError(err.message || String(err)) }
+        finally { if (current(epoch)) { live.current.busy = false; setBusy(false) } }
+      }
+      const load = (cursor = 0) => work(async (epoch) => {
+        setConfirmation(null); setSelected(null)
+        const value = await call('changedFiles', { sessionId, cursor, limit: 25 })
+        if (value.sessionId !== sessionId) throw new Error('会话不匹配，已拒绝显示')
+        if (current(epoch)) setPage({ ...value, cursor })
+      })
+      react.useEffect(() => {
+        live.current.epoch++; live.current.busy = false
+        setPage(null); setSelected(null); setConfirmation(null); setMessage(''); setError(''); setBusy(false)
+        if (sessionId && !running) load()
+        return () => { live.current.epoch++; live.current.busy = false }
+      }, [sessionId, call, running])
+      const view = (row, confirm) => work(async (epoch) => {
+        setConfirmation(null)
+        const value = await call('preview', { sessionId, entryId: row.entryId })
+        if (value.sessionId !== sessionId || value.entryId !== row.entryId) throw new Error('预览绑定不匹配')
+        if (current(epoch)) { setSelected(value); if (confirm && value.canRestore) setConfirmation(value) }
+      })
+      const restore = () => {
+        const bound = confirmation
+        if (!bound || bound.sessionId !== sessionId || running || !bound.canRestore || !bound.nonce) return
+        work(async (epoch) => {
+          // Read the exact same preview shown in the confirmation. No pathname or force is accepted.
+          setConfirmation(null)
+          const receipt = await call('restore', { sessionId: bound.sessionId, entryId: bound.entryId, nonce: bound.nonce, expectedCurrentHash: bound.expectedCurrentHash })
+          if (receipt.sessionId !== sessionId || receipt.entryId !== bound.entryId) throw new Error('操作回执会话不匹配')
+          if (!current(epoch)) return
+          setSelected(null)
+          setMessage(receipt.applied ? ('已恢复此文件；操作 ' + receipt.operationId + (receipt.recorded ? '' : '；审计回执未写入：' + receipt.auditError)) : '未完成恢复：' + receipt.error)
+          const value = await call('changedFiles', { sessionId, cursor: 0, limit: 25 })
+          if (value.sessionId === sessionId && current(epoch)) setPage({ ...value, cursor: 0 })
+        })
+      }
+      const visible = page && page.sessionId === sessionId ? page : null
+      const preview = selected && selected.sessionId === sessionId ? selected : null
+      const confirm = confirmation && confirmation.sessionId === sessionId ? confirmation : null
+      if (!sessionId) return h('p', null, '请先选择会话；不会读取其他会话的文件。')
+      return h('section', { style: pageStyle },
+        h('h2', null, '已修改文件'),
+        h('p', null, '会话：' + sessionId + '。捕获条目不代表工具成功。仅文件工具显式路径；shell、其他插件、人工编辑未覆盖。'),
+        running ? h('p', { role: 'status' }, '当前会话运行中；轮次结束后刷新，运行中禁止恢复。') : null,
+        h('button', { type: 'button', disabled: busy || running, onClick: () => load(), style: btnStyle }, busy ? '读取中…' : '刷新文件'),
+        error ? h('p', { role: 'alert' }, error) : null,
+        message ? h('p', { role: 'status' }, message) : null,
+        visible && !visible.rows.length ? h('p', null, '此会话没有文件捕获/目标条目（不表示没有 shell 改动）。') : null,
+        visible ? h('div', null,
+          h('p', null, visible.coverage),
+          ...visible.rows.map((row) => h('article', { key: row.entryId, style: cardStyle },
+            h('strong', { style: { overflowWrap: 'anywhere' } }, row.path),
+            line('修改类型', changeLabel(row.changeType)), line('捕获状态', captureLabel(row.captureStatus)),
+            line('轮次 / 工具', row.turns.join(', ') + ' / ' + (row.tools.join(', ') || '未记录工具名')),
+            line('前像可用', row.preImage && row.preImage.available ? '是' : '否'),
+            line('当前版本', row.current.status + ' / ' + row.current.bytes + ' 字节 / ' + (row.current.hash || '无哈希')),
+            !row.canRestore ? line('恢复限制', reasonLabel(row.reason)) : null,
+            h('button', { type: 'button', disabled: busy || running, onClick: () => view(row, false), style: btnStyle }, '查看差异'),
+            h('button', { type: 'button', disabled: busy || running || !row.canRestore, onClick: () => view(row, true), style: btnStyle }, '恢复此文件'),
+          )),
+          h('p', null, '共 ' + visible.total + ' 个路径；当前 ' + (visible.cursor + 1) + '–' + (visible.cursor + visible.rows.length)),
+          h('button', { type: 'button', disabled: busy || running || visible.cursor === 0, onClick: () => load(Math.max(0, visible.cursor - 25)) }, '上一页'),
+          h('button', { type: 'button', disabled: busy || running || visible.nextCursor === null, onClick: () => load(visible.nextCursor) }, '下一页'),
+        ) : null,
+        preview ? h('section', { style: cardStyle },
+          h('h3', null, '文件差异：' + preview.path), h('p', null, preview.diffBasis),
+          preview.captureStatus === 'preimage-only' ? h('p', null, '仅前像：缺少后像，无法证明本次工具实际执行或成功。') : null,
+          preview.diff.kind === 'text' ? h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 440, overflowY: 'auto' } }, preview.diff.text)
+            : h('p', null, preview.diff.kind === 'binary' ? '二进制或非 UTF-8 文件：不提供文本差异。' : '对象缺失或文件超限：无法生成文本差异。'),
+          preview.diff.truncated ? h('p', null, '差异已精简/截断，不是完整文件。') : null,
+          !preview.canRestore ? h('p', null, reasonLabel(preview.reason)) : null,
+          h('button', { type: 'button', disabled: busy || running || !preview.canRestore, onClick: () => setConfirmation(preview), style: btnStyle }, '恢复此文件'),
+        ) : null,
+        confirm ? h('section', { role: 'dialog', 'aria-label': '确认恢复此文件', style: cardStyle },
+          h('h3', null, '确认恢复此文件？'), h('p', null, confirm.path), h('p', null, confirm.action),
+          line('预览绑定的当前版本', confirm.expectedCurrentHash), line('将恢复前像', confirm.preImage && (confirm.preImage.existed ? confirm.preImage.hash : '原先不存在：撤回创建')),
+          h('p', null, '只恢复这个文件，不自动处理其他文件。文件、类型或路径变化将拒绝写入；当前内容先备份。不提供强制覆盖。预览两分钟有效。'),
+          h('button', { type: 'button', disabled: busy || running, onClick: restore, style: btnStyle }, '确认恢复'),
+          h('button', { type: 'button', disabled: busy, onClick: () => setConfirmation(null), style: btnStyle }, '取消'),
+        ) : null,
+      )
+    }
+    function ChangedFilesView(props) {
+      const running = props.useSession((s) => s.running) || false
+      return h(ChangedFilesPage, { key: props.sessionId || 'no-session', sessionId: props.sessionId, call: props.call, running })
+    }
+    function ChangedFilesSummary({ sessionId, useSession, call }) {
+      const running = useSession((s) => s.running) || false
+      const [value, setValue] = react.useState(null)
+      const [error, setError] = react.useState('')
+      react.useEffect(() => {
+        let alive = true
+        setValue(null); setError('')
+        if (sessionId && !running) call('changedFiles', { sessionId, cursor: 0, limit: 1 }).then((row) => {
+          if (alive && row.sessionId === sessionId) setValue(row)
+        }).catch((err) => { if (alive) setError(err.message || String(err)) })
+        return () => { alive = false }
+      }, [sessionId, running, call])
+      if (!sessionId || running) return null
+      if (error) return h('small', { role: 'status' }, '已修改文件摘要读取失败：' + error)
+      if (!value || value.sessionId !== sessionId || !value.total) return null
+      return h('small', { role: 'status' }, '已修改文件：' + value.total + ' 个捕获/目标路径。请打开「已修改文件」页签查看差异与单文件恢复；shell 等改动未覆盖。')
+    }
+
     const name = 'dsh-audit-rollback'
     const inject = ['slots', 'locale', 'remote']
     function apply(ctx) {
@@ -373,7 +540,7 @@ window.__ModuleLoader__.load({
       if (typeof ctx.effect === 'function') {
         ctx.effect(() => () => { disposed = true }, 'dsh-audit-rollback: dispose client')
       }
-      const call = async (method) => {
+      const call = async (method, ...args) => {
         const deadline = Date.now() + 20000
         await mounted
         for (;;) {
@@ -381,12 +548,13 @@ window.__ModuleLoader__.load({
           const service = ctx.get('remote.auditRollback')
           if (service !== undefined) {
             if (typeof service[method] !== 'function') throw new Error(`Host 缺少 ${method}`)
-            const result = await service[method]()
+            if (method !== 'read') parseRollbackRequest(method, args[0])
+            const result = await service[method](...args)
             if (!result || result.ok !== true) {
               const message = result && result.error ? (result.error.message || String(result.error)) : 'remote 调用失败'
               throw new Error(message)
             }
-            return parseStatus(result.value)
+            return method === 'read' ? parseStatus(result.value) : parseRollbackResult(method, result.value)
           }
           if (Date.now() > deadline) throw new Error('remote.auditRollback 挂载超时（20 秒）：Host 端状态服务未就绪')
           await new Promise((resolve) => setTimeout(resolve, 250))
@@ -431,9 +599,22 @@ window.__ModuleLoader__.load({
         console.warn('[dsh-audit-rollback] 探针: settings.plugins.tab 当前未声明，注册内置插件挂起等待；若重启后始终无「已注册 settings.plugins.tab」日志，说明 dsh-client-ui-settings-plugins 未启用')
       }
       registerInto('settings.plugins.tab', entry.tabId)
+      ctx.slots.inject('conversation.view', () => ctx.slots.register({
+        name: 'conversation.view', id: 'dsh-guard.changed-files', order: 120, label: '已修改文件',
+        inject: () => ({ call }),
+      }, ChangedFilesView))
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock', id: 'dsh-guard.changed-files-summary', order: 120,
+        inject: () => ({ call }),
+      }, ChangedFilesSummary))
     }
 
     // Pure client helpers exported for the zero-build VM/UI contract tests.
+    exports.ChangedFilesPage = ChangedFilesPage
+    exports.ChangedFilesView = ChangedFilesView
+    exports.ChangedFilesSummary = ChangedFilesSummary
+    exports.rollbackDescriptors = rollbackDescriptors
+    exports.parseRollbackRequest = parseRollbackRequest
     exports.dictionaries = { zh, en }
     exports.SettingsEditor = SettingsEditor
     exports.validateDraft = validateDraft

@@ -19,8 +19,10 @@
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 精确回滚；带可编辑设置页 | 0.2.3 |
-| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 把 Auto 审查的 reviewer 路由解耦为可配置 `provider`/`model`/`effort`；带可编辑设置页 | 0.2.3 |
+| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 回滚 + 会话内已修改文件预览/二次确认恢复；带可编辑设置页 | 0.3.0 |
+| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 可配置 reviewer 路由、合法高危拒绝转官方单次人工审批、审批阶段历史与结果摘要；带可编辑设置页 | 0.3.0 |
+
+以上是工作区开发树的实现描述，不代表这些改动已在 GUI 实机验收。基线版本 `0.3.0`。
 
 业务存储逻辑只使用 `node:*`；配置声明使用宿主提供的官方 schema peer，设置写入走宿主 `settings` / `configEditor`，不捆绑另一套 DSH 核心，不另建配置文件。
 
@@ -63,25 +65,28 @@ dsh plugin --profile <name> add <包绝对路径或 tarball URL>
 - [`docs/design-audit-rollback.md`](docs/design-audit-rollback.md) — 阶段 A 契约（数据布局、账本字段、CLI 退出码、跨平台要求）
 - [`docs/design-auto-review-router.md`](docs/design-auto-review-router.md) — 阶段 B 契约（Config、策略文本、决策协议、上下文分区）
 - [`docs/design-plugin-ui-and-listing.md`](docs/design-plugin-ui-and-listing.md) — 设置 UI 与商店收录
+- [`docs/approval-observability-design.md`](docs/approval-observability-design.md) — 审批阶段历史、人工继承与会话文件恢复边界（当前开发设计）
 - [`docs/release-plan.md`](docs/release-plan.md)、[`docs/release.md`](docs/release.md) — CI 与发包流程
 
 ## 开发
 
 ```sh
 npm install --ignore-scripts     # 仅仓库开发依赖，不在 DSH profile 目录执行
-node tools/verify.mjs            # 机械验收：语法、全部测试、API peer、清单一致性
-node scripts/check-manifest.mjs  # 逐包清单校验（含 exports["./client"] 门禁）
-node scripts/pack-all.mjs        # 打包到 dist/ 并核对实际 tarball 字节及 JS 语法
-npm run release:local            # verify + check-manifest + pack-all
+node tools/verify.mjs --quiet    # 机械验收：源码语法、自动发现 test/*.mjs（排除 runtime/bootstrap/helper）、API peer 与包清单
+node scripts/check-manifest.mjs  # 逐包发布清单校验（含运行 helper 与 exports["./client"] 门禁）
+# pack-all / release:local 会生成发布产物；须有单独发版授权
 ```
 
 CI（`.github/workflows/ci.yml`）在 `main` 推送时跑同一套序列；`v*` tag 触发版本化发布（`make_latest: false`，不会抢 latest）。
 
 ## 已知限制
 
-- 审计只覆盖**文件工具点名**的路径（`write` / `edit` / `str_replace_editor`）；**shell（pwsh/bash）对文件的改动不入账**，`gitSnapshot` 是未实现的占位开关。
+- 会话文件视图仅覆盖捕获配置中的文件工具路径；shell（pwsh/bash）、其他插件和人工改动不在覆盖范围。恢复只面向已结束且有完整前后像、路径身份与当前内容均通过复核的记录；历史只有前像的记录不可恢复。旧 CLI 与 GUI 恢复能力边界见包文档。
+- 审批历史独立存放于 profile ledger，每文件上限 16 MiB、无自动轮转；写入串行仅在同一 Host 进程内，不构成跨 Host 多进程文件锁。摘要遮罩仅为尽力减少敏感信息，不保证识别任意秘密。
+- `reported-result` 是框架报告的结果，不证明工具 body 确实执行；审批允许、工具报告成功与实际副作用是不同阶段。
+- `never` 策略不创建人工审批请求；其他符合条件的 reviewer 明确拒绝可默认转官方人工单次审批（60 秒后通过请求级 signal 真正取消）。这不绕过后续核心 guard。
 - `dsh-auto-review-router` 与官方 `dsh-experimental-auto-review` **互斥**（两者都注册保留名 `auto`，后注册者会失败），也不要与 `dsh-codex-connect` 的 `enableAutoReview` 同时启用。
-- 两者的 Host 侧都未在真实 DSH 进程里跑过完整链路（见各包 README 的「未核实项」）；`dsh-auto-review-router` 的 13 项内部 API 用法是探测式实现。
+- SDK `0.2.1-alpha.1` 的扩展点限于会话 Tab 与 composer 结果摘要，不提供逐工具卡片徽标或轨迹行内提示；不替换官方 renderer，也不声称覆盖 Codex 全部 undo 能力。工作区实施与离线测试不等于发布、安装或 GUI 验收。
 
 ## 许可证
 
