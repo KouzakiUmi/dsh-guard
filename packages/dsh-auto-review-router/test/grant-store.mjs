@@ -3,10 +3,10 @@
 // 账本伪造矩阵、useCount 落盘与过期复活等反例。
 import './runtime.mjs'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, existsSync, rmSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createGrantStore, targetPathOf, operationClassOf, grantLedgerPath,
-  isProtectedTarget, isTooBroadRoot, verifyAncestors } from '../lib/grant-store.js'
+  isProtectedTarget, isTooBroadRoot, verifyAncestors, isInside } from '../lib/grant-store.js'
 
 // 不用 os.tmpdir()：它落在 %LOCALAPPDATA%\Temp 下，而 AppData 是授权记忆的
 // 敏感段（MEDIUM-1 修复），会把 fixture 判成过宽根。改用 D 盘根下的
@@ -19,6 +19,13 @@ const file = (p, content = 'x') => { writeFileSync(p, content); return p }
 let passed = 0
 const ok = (name) => { passed += 1; console.log(`PASS ${name}`) }
 const canSymlink = (() => { try { symlinkSync(root, join(root, '_probe'), 'junction'); return true } catch { return false } })()
+// N1 探针：hardlink 通常无特权即可创建，但网络盘/特殊 FS 可能不支持。
+const canHardlink = (() => {
+  try {
+    const a = join(root, '_hl-probe-a'), b = join(root, '_hl-probe-b')
+    writeFileSync(a, 'x'); linkSync(a, b); return true
+  } catch { return false }
+})()
 
 try {
   // ── 正常路径：授权后同目录同类免问 ────────────────────────────────
@@ -290,6 +297,137 @@ try {
     assert.equal(s.list().length, 0, '清空后无残留授权')
     assert.equal(s.check(p, 'edit').hit, false)
     ok('clear 撤销全部授权')
+  }
+
+  // ── N1 HIGH：hardlink 逃逸授权根 ────────────────────────────────
+  if (canHardlink) {
+    {
+      const s = store('hardlink')
+      const base = dir('hardlink')
+      const safe = join(base, 'safe'); mkdirSync(safe, { recursive: true })
+      const outside = dir('hardlink-outside')
+      const victim = join(outside, 'victim.txt')
+      writeFileSync(victim, 'ORIGINAL')
+      s.remember(file(join(safe, 'ok.txt')), 'edit', evidence)
+      // 在授权目录内放一个指向根外文件的 hardlink
+      const alias = join(safe, 'notes.txt')
+      linkSync(victim, alias)
+      const r = s.check(alias, 'edit')
+      assert.equal(r.hit, false, `hardlink 必须不命中（实际 ${JSON.stringify(r)}）`)
+      // 端到端：即使绕过判定写入，授权根外也不该被改（此处验证 r.hit=false 即可）
+      assert.equal(readFileSync(victim, 'utf8'), 'ORIGINAL', '授权根外文件未被触碰')
+      // remember 侧同样拒绝
+      assert.equal(s.remember(alias, 'edit', evidence).ok, false, 'hardlink 不可被授权')
+      ok('N1 HIGH hardlink 逃逸授权根被拒')
+    }
+    // hardlink 指向 .git\config —— HIGH-2 的等价变体
+    {
+      const s = store('hardlink-git')
+      const repo = dir('hardlink-git-repo')
+      const git = join(repo, '.git'); mkdirSync(git, { recursive: true })
+      const cfg = join(git, 'config'); writeFileSync(cfg, '[core]\n')
+      const safe = join(repo, 'work'); mkdirSync(safe, { recursive: true })
+      s.remember(file(join(safe, 'ok.txt')), 'edit', evidence)
+      const alias = join(safe, 'config')
+      linkSync(cfg, alias)
+      assert.equal(s.check(alias, 'edit').hit, false, '不得借 hardlink 改写 .git/config')
+      assert.equal(readFileSync(cfg, 'utf8'), '[core]\n', '.git/config 未被触碰')
+      ok('N1b 借 hardlink 改写 .git/config 被拒')
+    }
+  } else {
+    console.log('SKIP hardlink 用例：文件系统不支持')
+  }
+
+  // ── N2 HIGH：clear() 撤销必须跨重启生效 ─────────────────────────
+  {
+    const name = 'revoke'
+    const s = store(name)
+    const d = dir(name)
+    const p = file(join(d, 'a.txt'))
+    assert.equal(s.remember(p, 'edit', evidence).ok, true)
+    assert.equal(s.check(p, 'edit').hit, true)
+    assert.equal(s.clear(), true, 'clear 应成功')
+    assert.equal(s.check(p, 'edit').hit, false, 'clear 后本进程不再命中')
+    // 关键：模拟重启（新 store 实例）后必须仍然是撤销状态
+    const after = createGrantStore(grantLedgerPath(join(root, name)))
+    assert.equal(after.check(p, 'edit').hit, false, '重启后撤销不得失效')
+    assert.equal(after.list().length, 0, '重启后账本无存活授权')
+    ok('N2 HIGH clear() 撤销跨重启生效')
+  }
+
+  // ── N4/N5：preview 与 remember/check 同源 ───────────────────────
+  {
+    const s = store('preview')
+    const d = dir('preview')
+    const p = file(join(d, 'a.txt'))
+    // N4：delete 类不可授权，文案不得承诺
+    assert.deepEqual(s.preview(p, 'delete'), { grantable: false, reason: 'not-grantable-op' })
+    assert.deepEqual(s.preview(p, undefined), { grantable: false, reason: 'not-grantable-op' })
+    // N5：.env 目标不可授权（check 也恒不命中），文案不得承诺 30 天免问
+    const env = file(join(d, 'secret.env'), 'K=V')
+    assert.equal(s.preview(env, 'edit').grantable, false, '.env 不得承诺可授权')
+    assert.equal(s.check(env, 'edit').hit, false)
+    // 正常目标：preview 说可授权，remember 也必须真存下
+    const good = s.preview(p, 'edit')
+    assert.equal(good.grantable, true, `正常目标应可授权（${JSON.stringify(good)}）`)
+    assert.equal(s.remember(p, 'edit', evidence).ok, true)
+    assert.equal(s.check(p, 'edit').hit, true, 'preview 说能记，check 就必须命中')
+    ok('N4/N5 preview 与 remember/check 同源')
+  }
+
+  // ── N7：str_replace_editor 的 view 不产生授权 ───────────────────
+  {
+    const s = store('sre')
+    const d = dir('sre')
+    const p = file(join(d, 'a.txt'))
+    assert.equal(operationClassOf('str_replace_editor', { command: 'view' }), undefined, '只读 view 不记忆')
+    assert.equal(operationClassOf('str_replace_editor', { command: 'create' }), 'create')
+    assert.equal(operationClassOf('str_replace_editor', { command: 'str_replace' }), 'edit')
+    assert.equal(operationClassOf('str_replace_editor', { command: 'insert' }), 'edit')
+    assert.equal(operationClassOf('str_replace_editor', { command: 'unknown' }), undefined, '未知 command fail closed')
+    assert.equal(operationClassOf('str_replace_editor', {}), undefined, '无 command fail closed')
+    ok('N7 str_replace_editor 按 command 分类，view 不授权')
+  }
+
+  // ── N3：敏感段覆盖 DSH 记忆目录与包管理器凭据 ───────────────────
+  {
+    for (const seg of ['.dsh-memory', '.claude', '.m2', '.gradle', 'secrets', 'credentials', '.npm', '.cargo']) {
+      assert.equal(isTooBroadRoot(`d:\\proj\\${seg}\\sub`), true, `${seg} 子树不可授权`)
+    }
+    for (const p of ['c:\\windows\\temp\\x', 'c:\\users\\public\\documents\\x', 'c:\\$recycle.bin\\s-1-5-21-1\\x', 'c:\\inetpub\\wwwroot\\x', 'c:\\perflogs\\x']) {
+      assert.equal(isTooBroadRoot(p), true, `${p} 不可授权`)
+    }
+    ok('N3 敏感段与系统目录覆盖完整')
+  }
+
+  // ── N8：账本行数有界（压实）─────────────────────────────────────
+  {
+    const name = 'compact'
+    const s = createGrantStore(grantLedgerPath(join(root, name)), { maxLedgerLines: 20, maxUseCount: 1000 })
+    const d = dir(name)
+    const p = file(join(d, 'a.txt'))
+    s.remember(p, 'edit', evidence)
+    for (let i = 0; i < 200; i += 1) s.check(p, 'edit')
+    const lines = readFileSync(grantLedgerPath(join(root, name)), 'utf8').trim().split('\n').filter(Boolean)
+    assert.ok(lines.length <= 40, `账本行数必须有界（实际 ${lines.length}）`)
+    assert.equal(s.check(p, 'edit').hit, true, '压实后授权仍有效')
+    // 重启后要用同一组上限，否则 200 次已超过默认 100 次上限（那是正确行为，不是缺陷）
+    const reopened = createGrantStore(grantLedgerPath(join(root, name)), { maxLedgerLines: 20, maxUseCount: 1000 })
+    assert.equal(reopened.check(p, 'edit').hit, true, '压实后重启仍有效')
+    const counted = reopened.check(p, 'edit')
+    assert.equal(counted.hit, true)
+    // 超过 1000 次上限后应停止命中（默认上限下的行为另测）
+    for (let i = 0; i < 1000; i += 1) reopened.check(p, 'edit')
+    assert.equal(reopened.check(p, 'edit').hit, false, '超过次数上限应停止免问')
+    ok('N8 账本行数有界（压实），重启后计数延续')
+  }
+
+  // ── N10：isInside 大小写归一 ────────────────────────────────────
+  {
+    assert.equal(isInside('D:\\PROJ\\x', 'd:\\proj'), true, '大小写不同仍应判定为在内')
+    assert.equal(isInside('d:\\proj', 'D:\\PROJ'), true)
+    assert.equal(isInside('d:\\proj2\\x', 'd:\\proj'), false, '前缀相同但不同目录不得误判')
+    ok('N10 isInside 大小写归一')
   }
 
   console.log(`grant-store: ${passed} 组场景通过`)

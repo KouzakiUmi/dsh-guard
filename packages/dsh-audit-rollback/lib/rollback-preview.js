@@ -70,6 +70,13 @@ function inspect(stateDir, entries, g) {
   // 判据：before.existed === false 且 before.guards 为空 → 跳过基线比对。
   const beforeBaselineEmpty = before?.existed === false && Array.isArray(before.guards) && before.guards.length === 0
   if (before && after && !beforeBaselineEmpty && !same(before.guards, after.guards)) reason ||= 'BASELINE_ANCESTOR_CHANGED'
+  // 2026-10-05 修正（N9）：HIGH-5 跳过基线比对后暴露一个新错误——g.first 是**首个**
+  // before，g.last 是**末个** after，跨轮时二者不同轮。turn1 建文件、turn2 编辑它，
+  // 于是 before.existed=false 却拿 turn2 的 after 相比，changeType 报 created、
+  // action 说「撤回创建」，restore 真把含最新内容的文件删了。
+  // 判据：before 声称「文件原本不存在」时，必须**同轮**就有 after；跨轮说明
+  // 文件在创建之后又被改过，撤回动作会丢掉后续工作 —— 不给出可回滚结论。
+  if (beforeBaselineEmpty && after && after.turn !== before.turn) reason ||= 'CREATED_IN_EARLIER_TURN'
   if (g.captures.some(({ e }) => e.phase === 'before' && !g.captures.some(({ e: post }) => post.phase === 'after' && post.turn === e.turn))) reason ||= 'INCOMPLETE_TURN_CAPTURE'
   // Full-only applies to EVERY captured image, not just the displayed endpoints.
   let historyComplete = true
@@ -100,7 +107,13 @@ function inspect(stateDir, entries, g) {
   if (after && (current.existed !== after.existed || (current.existed && (!current.buffer || sha1Hex(current.buffer) !== after.hash)))) reason ||= 'CURRENT_HASH_CONFLICT'
   if (g.first && entries.some((e, index) => e.kind === 'capture' && typeof e.path === 'string' && canonicalPathKey(e.path) === g.key && index > g.first.index && (e.session !== before.session || index > g.last.index))) reason ||= 'NEWER_OR_OTHER_SESSION_CAPTURE'
   if (before && after && before.existed === after.existed && before.hash === after.hash) reason ||= 'NO_CAPTURED_CHANGE'
-  const changeType = !before || !after ? 'unknown' : before.existed === false && after.existed ? 'created' : before.existed && after.existed === false ? 'deleted' : before.hash === after.hash ? 'unchanged' : 'modified'
+  // 跨轮创建后又被编辑：实际是「修改」，不是「创建」。报 created 会让 UI 显示
+  // 「撤回创建」，掩盖了「这里有一份后续工作会被删掉」的真实含义。
+  const crossTurnCreate = beforeBaselineEmpty && after && after.turn !== before.turn
+  const changeType = !before || !after ? 'unknown' : crossTurnCreate ? 'modified'
+    : before.existed === false && after.existed ? 'created'
+      : before.existed && after.existed === false ? 'deleted'
+        : before.hash === after.hash ? 'unchanged' : 'modified'
   const tools = [...new Set([...g.calls.map((e) => e.tool), ...g.captures.map(({ e }) => e.tool)].filter((s) => typeof s === 'string'))]
   const row = { entryId: g.entryId, path: g.path, turns: [...new Set(g.captures.map(({ e }) => e.turn).concat(g.calls.map((e) => e.turn)))], tools,
     changeType, captureComplete: historyComplete, captureStatus: !before ? 'not-captured' : !after ? 'preimage-only' : !historyComplete ? 'incomplete-history' : 'before-and-after',
@@ -184,7 +197,11 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
       }
       return { sessionId, entryId, ...view.row, nonce, expectedCurrentHash, expiresAt: nonce ? now() + TTL : null,
         diff, diffBasis: '首个捕获前像 → 当前文件（不保证是完整会话净改动）',
-        action: view.before?.existed === false ? '撤回创建（备份后移除文件）' : '恢复首个捕获前像（保留当前文件备份）' }
+        // N9：只在「首个 before 声称原本不存在」且**同轮**有 after 时才是「撤回创建」。
+        // 跨轮（创建之后又编辑过）说「撤回创建」会诱导用户丢掉后续工作。
+        action: view.before?.existed === false && view.row.changeType === 'created'
+          ? '撤回创建（备份后移除文件）'
+          : '恢复首个捕获前像（保留当前文件备份）' }
     },
     async restore(request) {
       parseRollbackRequest('restore', request)

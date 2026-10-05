@@ -8,8 +8,7 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
 import { createApprovalHistory, parseHistoryRequest, parseHistoryResult } from './approval-history.js'
-import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf,
-  verifyAncestors, isTooBroadRoot, isSelfProtected } from './grant-store.js'
+import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf } from './grant-store.js'
 export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
@@ -447,6 +446,7 @@ function grantMemoFor(state, exec) {
 const NOOP_GRANTS = {
   check() { return { hit: false, reason: 'store-unavailable' } },
   remember() { return { ok: false, reason: 'store-unavailable' } },
+  preview() { return { grantable: false, reason: 'store-unavailable' } },
 }
 
 const sessionIdOf = (session) => (session && typeof session.id === 'string' ? session.id : 'unknown')
@@ -458,22 +458,25 @@ const GRANT_MAX_AGE_DAYS = 30
 /**
  * 这次人工放行**会不会**被授权记忆吸收，以及吸收的范围。
  * 返回 null 表示「只对本次生效」——文案必须如实这么写（HIGH-4）。
- * 判定口径与 manualFallback 里真正调用 remember 的分支逐条一致，
- * 否则就会出现「提示说会记住、实际没记」或反过来的错配。
+ *
+ * 判定一律走 store.preview()，与 remember()/check() 同一份实现。
+ * 2026-10-05 复核实证：文案与 remember 各自重算判定时出现过两类错配 ——
+ * delete 类文案承诺会记住而 remember 必然拒绝；.env 目标承诺 30 天免问而
+ * check 恒返回 protected-path。
  */
-function grantableOutcome(exec, config) {
+function grantableOutcome(exec, config, store) {
   if (!config.manualFallback) return null
   const target = targetPathOf(exec.arguments)
   const opClass = operationClassOf(exec.name, exec.arguments)
   if (target === undefined || opClass === undefined) return null
-  // 与 remember 走同一套判定：祖先链不可信、目录过宽、敏感路径时都不会落记忆，
-  // 此时提示必须说「仅本次生效」，不能承诺一个不会发生的记忆。
-  const verified = verifyAncestors(target)
-  if (!verified.ok) return null
-  if (isTooBroadRoot(verified.dirKey) || isSelfProtected(verified.dirKey)) return null
+  if (store === null || store === undefined) return null
+  let verdict
+  try { verdict = store.preview(target, opClass) }
+  catch { return null }
+  if (!verdict.grantable) return null
   const opLabel = opClass === 'create' ? { en: 'file creation', zh: '新建文件' } : { en: 'file edit', zh: '编辑文件' }
   return {
-    scopeText: { en: `${opLabel.en} under ${target}`, zh: `${opLabel.zh} · ${target}` },
+    scopeText: { en: `${opLabel.en} under ${verdict.dir}`, zh: `${opLabel.zh} · ${verdict.dir}` },
     days: GRANT_MAX_AGE_DAYS,
     maxUses: GRANT_MAX_USES,
   }
@@ -534,7 +537,7 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
   // HIGH-4：文案必须与实际授予一致。用户若不知道「放行会记住这个目录」，
   // 就在毫不知情的情况下签了一份 30 天 / 100 次 / 整棵子树的授权。
   // 以下三点必须同时出现在提示里：具体命令、会记住什么、记住多久。
-  const grant = grantableOutcome(exec, config)
+  const grant = grantableOutcome(exec, config, grantMemoFor(state, exec))
   const grantLine = grant === null ? {
     en: 'This decision applies to this single call only — nothing will be remembered.',
     zh: '本次决定仅对这一次调用生效，不会被记住。',
@@ -564,19 +567,29 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
     history.manualOutcome(entry, final)
     if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
     if (final === 'allowed-once') {
-      // R6：只有用户显式放行才写记忆。放行本身即显式授权，写入失败也只是退回「下次再问」。
+      // R6：只有用户显式放行才写记忆。放行本身即显式授权。
       if (risk === 'medium' && entry?.approvalRequestId) {
         const memo = grantMemoFor(state, exec)
         const target = targetPathOf(exec.arguments)
         const opClass = operationClassOf(exec.name, exec.arguments)
         if (target !== undefined && opClass !== undefined) {
+          // N6：写入失败必须留痕。此前返回值被直接丢弃，记忆没生效时
+          // 用户和审计都无从知晓——只能靠「下次又问」反推。
+          // 成功时不再重复记 manual 行（manualOutcome 已记过，重复会污染账本）。
+          let result = { ok: false, reason: 'store-unavailable' }
           try {
-            memo.remember(target, opClass, {
+            result = memo.remember(target, opClass, {
               session: sessionIdOf(exec.agent?.session),
               tool: exec.name,
               approvalRequestId: entry.approvalRequestId,
             })
-          } catch { /* 记不住就下次再问，不影响本次放行 */ }
+          } catch {
+            result = { ok: false, reason: 'threw' }
+          }
+          if (!result.ok) {
+            entry.grantStoreFailure = String(result.reason).slice(0, 40)
+            ctx.logger?.warn?.(`auto-review-router: 授权记忆写入失败，本次放行但下次仍会询问：${entry.grantStoreFailure}`)
+          }
         }
       }
       return { kind: 'allow' }

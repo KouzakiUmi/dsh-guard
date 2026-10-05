@@ -29,7 +29,7 @@
  * R10 使用次数或时效超限 → 重新问一次
  */
 
-import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 
 /** 与 dsh-audit-rollback 的 canonicalPathKey 同口径：win32 下小写归一。 */
@@ -55,9 +55,16 @@ function canonicalize(target) {
 
 
 
+/**
+ * 目录归属判定。内部归一大小写（N10）：作为导出 API 时，
+ * `isInside('D:\\PROJ\\x', 'd:\\proj')` 必须为真，否则调用方一旦忘记归一
+ * 就会得到「明明在里面却不命中」的反直觉结果。
+ */
 function isInside(childKey, parentKey) {
-  if (childKey === parentKey) return true
-  return childKey.startsWith(parentKey.endsWith(sep) ? parentKey : `${parentKey}${sep}`)
+  const child = canonicalPathKey(childKey)
+  const parent = canonicalPathKey(parentKey)
+  if (child === parent) return true
+  return child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`)
 }
 
 /**
@@ -174,12 +181,26 @@ function isTooBroadRoot(dirKey) {
   return false
 }
 
-/** 出现在授权路径任一层即拒绝：这些目录承载凭据、配置、会话记忆或系统文件。 */
+/**
+ * 出现在授权路径任一层即拒绝：这些目录承载凭据、配置、会话记忆或系统文件。
+ * 2026-10-05 复核实证（N3）：原名单遗漏了 DSH 自身的记忆目录 `.dsh-memory`
+ * （工作区级记忆日志与反思）、其它 agent 的配置目录、以及包管理器凭据目录。
+ */
 const SENSITIVE_SEGMENTS = new Set([
-  '.dsh', '.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config',
-  'appdata', 'programdata', 'system32',
-  // 系统程序目录：授权 C:\Program Files\... 下任意深度都过宽
-  // （含 DSH NEXT 安装树，写进去等于改宿主与插件本体）。
+  // DSH 自身
+  '.dsh', '.dsh-memory', 'dsh-memory-palace', '.deepseek-harness',
+  // 凭据与密钥
+  '.ssh', '.gnupg', '.gpg', '.aws', '.azure', '.kube', '.docker', '.password-store',
+  '.keyring', '.vault', 'secrets', '.secrets', 'credentials', '.credentials', 'keys', '.keys',
+  // 其它 agent 的配置/记忆
+  '.claude', '.gemini', '.cursor', '.copilot', '.aider', '.opencode', '.continue',
+  '.windsurf', '.cline', '.config',
+  // 包管理器（内含 credentials.xml / .npmrc / gradle.properties 等）
+  '.m2', '.gradle', '.nuget', '.ivy2', '.sbt', '.cabal', '.stack',
+  '.npm', '.yarn', '.pnpm-store', '.cargo', '.rustup', '.gem', '.composer', '.cache',
+  // 系统与共享目录
+  'appdata', 'programdata', 'system32', 'windows', 'public', 'inetpub', 'perflogs',
+  '$recycle.bin', 'recovery', 'sysvol',
   'program files', 'program files (x86)',
 ])
 
@@ -213,7 +234,17 @@ export function operationClassOf(toolName, args) {
     || toolName === 'rmdir' || toolName === 'rmtree'
   if (destructive) return isDir ? 'delete-recursive' : 'delete'
   if (toolName === 'write' || toolName === 'create') return 'create'
-  if (toolName === 'edit' || toolName === 'str_replace_editor' || toolName === 'patch' || toolName === 'apply_patch') {
+  // N7：str_replace_editor 用 args.command 区分行为（官方枚举 view|create|str_replace|insert）。
+  // 此前一律返回 'edit'，于是「查看文件」这种只读操作也会被记成编辑授权并免问，
+  // 提示里写的命令与实际执行的不符。
+  if (toolName === 'str_replace_editor') {
+    const command = args.command
+    if (command === 'view') return undefined            // 只读：没有可授予的写权限
+    if (command === 'create') return isDir ? undefined : 'create'
+    if (command === 'str_replace' || command === 'insert') return isDir ? undefined : 'edit'
+    return undefined                                    // 未知 command：fail closed
+  }
+  if (toolName === 'edit' || toolName === 'patch' || toolName === 'apply_patch') {
     return isDir ? undefined : 'edit'
   }
   // MEDIUM-3：rename/move 的 destination 落在另一个目录，而 targetPathOf 只取源。
@@ -258,31 +289,49 @@ export function createGrantStore(filePath, options = {}) {
   const maxGrants = Number.isInteger(options.maxGrants) && options.maxGrants > 0 ? options.maxGrants : 200
   const maxUseCount = Number.isInteger(options.maxUseCount) && options.maxUseCount > 0 ? options.maxUseCount : 100
   const maxAgeMs = Number.isInteger(options.maxAgeMs) && options.maxAgeMs > 0 ? options.maxAgeMs : 30 * 24 * 3600 * 1000
+  // N8：账本文件行数上界，超过即压实重写。
+  const maxLedgerLines = Number.isInteger(options.maxLedgerLines) && options.maxLedgerLines > 0 ? options.maxLedgerLines : 512
+  let linesWritten = 0
   let grants = null
   let writable = true
+  // 撤销墓碑时间戳：所有 at <= 该值的授权行都视为已撤销（N2）。
+  let clearedAt = 0
+
+  const grantKey = (grant) => `${grant.dir} ${grant.opClass}`
 
   function load() {
     if (grants !== null) return grants
     const byKey = new Map()
+    let latestEpoch = 0
+    let lineCount = 0
     try {
       for (const line of readFileSync(filePath, 'utf8').split('\n')) {
         if (!line) continue
+        lineCount += 1
         let parsed = null
         try { parsed = JSON.parse(line) } catch { continue }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+        // 墓碑行：{ v: 1, epoch }。取最大值，最终生效。
+        if (parsed.epoch !== undefined) {
+          if (Number.isSafeInteger(parsed.epoch) && parsed.epoch > latestEpoch) latestEpoch = parsed.epoch
+          continue
+        }
         const grant = parseGrant(parsed)
         if (grant === null) continue
         // 同一 (dir, opClass) 可能有多行（计数落盘、过期后重新批准）。
         // 语义是 append-only 覆盖：最后一行是当前有效状态。
-        byKey.set(`${grant.dir}${grant.opClass}`, grant)
+        byKey.set(grantKey(grant), grant)
       }
     } catch {
       // 账本不存在是正常的首次状态；读失败按「无可信记忆」处理（继续问人）。
     }
-    grants = [...byKey.values()]
+    linesWritten = lineCount
+    if (latestEpoch > clearedAt) clearedAt = latestEpoch
+    const live = [...byKey.values()].filter(grant => grant.at > clearedAt)
+    grants = live
     if (grants.length > maxGrants) grants = grants.slice(grants.length - maxGrants)
     return grants
   }
-
   /**
    * 该目标是否已被人工授权过。仅 medium 风险、且调用方已确认策略允许时使用。
    * @param {string} rawPath 目标绝对路径（内部会规范化，不信任传入字符串）
@@ -296,6 +345,10 @@ export function createGrantStore(filePath, options = {}) {
     // 词法前缀再像也不算命中。
     const verified = verifyAncestors(rawPath)
     if (!verified.ok) return { hit: false, reason: verified.reason }
+    // N1：祖先链干净还不够，目标文件本身也要可信。hardlink 让「写进来」等于
+    // 「写到别处去」，而 inode 别名是词法检查看不见的。
+    const leaf = verifyLeaf(rawPath)
+    if (!leaf.ok) return { hit: false, reason: leaf.reason }
     // 敏感判定必须看**完整目标路径**（含文件名）：只按目录判会把 x.env 当成普通目录放过。
     if (isSelfProtected(canonicalPathKey(canonicalize(rawPath)))) return { hit: false, reason: 'protected-path' } // R2
     const targetKey = verified.dirKey
@@ -319,6 +372,39 @@ export function createGrantStore(filePath, options = {}) {
   }
 
   /**
+   * 目标**文件本身**是否可信。
+   *
+   * 2026-10-05 复核实证（N1）：verifyAncestors 只从 dirname 向上走，目标文件从不
+   * 进入校验循环、也不查 nlink。授权 C:\T\safe\dir 后，在 dir 内 hardlink 一个
+   * 指向 C:\T\OUTSIDE\victim.txt 的 notes.txt —— check 命中免问，而写操作
+   * 实际改写了授权根之外的文件。同理可 hardlink 到 repo\.git\config，
+   * 绕开 R2（.git 是词法检查看不见的）。hardlink 任何用户可建，零特权。
+   *
+   * 口径与 dsh-audit-rollback 的 probeFile 一致（nlink !== 1 → UNSAFE_FILE_TYPE）。
+   * 目标不存在是 create 场景的正常状态，不算不可信。
+   *
+   * @returns {{ ok: true } | { ok: false, reason: string }}
+   */
+  function verifyLeaf(targetPath) {
+    let info
+    try { info = lstatSync(targetPath) }
+    catch (error) {
+      if (error && error.code === 'ENOENT') return { ok: true }   // 尚不存在：create 场景
+      return { ok: false, reason: `leaf-lstat-failed:${error && error.code ? error.code : 'UNKNOWN'}` }
+    }
+    if (info.isSymbolicLink()) return { ok: false, reason: 'leaf-symlink' }
+    if (!info.isFile()) return { ok: false, reason: 'leaf-not-file' }
+    // hardlink：同一 inode 有多个名字，写进来等于写到别处去。
+    if (info.nlink !== 1) return { ok: false, reason: 'leaf-hardlink' }
+    let physical
+    try { physical = realpathSync.native(targetPath) }
+    catch { return { ok: false, reason: 'leaf-realpath-failed' } }
+    const same = process.platform === 'win32' ? physical.toLowerCase() === targetPath.toLowerCase() : physical === targetPath
+    if (!same) return { ok: false, reason: 'leaf-redirected' }
+    return { ok: true }
+  }
+
+  /**
    * 记住一次人工放行（R6：只由用户显式放行触发）。落盘失败返回 false，
    * 调用方据此继续走「再问一次」——记不住就问，绝不静默放行。
    */
@@ -330,6 +416,8 @@ export function createGrantStore(filePath, options = {}) {
     const { session, tool, approvalRequestId } = evidence
     if (typeof session !== 'string' || session === '' || typeof tool !== 'string' || tool === ''
       || typeof approvalRequestId !== 'string' || approvalRequestId === '') return { ok: false, reason: 'bad-evidence' }
+    const leaf = verifyLeaf(rawPath)
+    if (!leaf.ok) return { ok: false, reason: leaf.reason }
     const verified = verifyAncestors(rawPath)
     if (!verified.ok) return { ok: false, reason: verified.reason }
     const dirKey = verified.dirKey
@@ -352,6 +440,8 @@ export function createGrantStore(filePath, options = {}) {
       writable = false
       return { ok: false, reason: 'write-failed' }
     }
+    linesWritten += 1
+    if (linesWritten >= maxLedgerLines) compact()
     current.push(grant)
     if (current.length > maxGrants) current.splice(0, current.length - maxGrants)
     return { ok: true, reason: 'stored' }
@@ -359,23 +449,83 @@ export function createGrantStore(filePath, options = {}) {
 
   /**
    * 落盘累计次数（MEDIUM-2）。此前 useCount 只在内存自增，重启即归零，
-   * 每次重启白送 maxUseCount 次免问。这里以「同 id 的最新一行为准」追加，
-   * load() 逐行覆盖，取最后一条生效。
+   * 每次重启白送 maxUseCount 次免问。这里以「同 (dir,opClass) 的最新一行为准」追加。
    * 写失败只是失去这项防护，不影响本次放行判定（检查已在上方完成）。
+   *
+   * 2026-10-05 复核实证（N8）：每次命中都 append 一行，账本文件行数无上界
+   * （maxGrants 只裁内存条目数，文件侧 5 目录 ×120 次 = 505 行，且过期复活
+   * 持续追加），每次 DSH 启动都要全量 readFileSync + 逐行 JSON.parse。
+   * 现在超过行数上界就重写整份（compaction）；重写失败退回 append 语义。
    */
   function persistCount(grant) {
     if (!writable) return
-    try { appendFileSync(filePath, `${JSON.stringify({ ...grant, useCount: grant.useCount })}\n`, 'utf8') } catch { /* 保持只读 */ }
+    const line = `${JSON.stringify({ ...grant, useCount: grant.useCount })}\n`
+    try { appendFileSync(filePath, line, 'utf8') } catch { return }
+    linesWritten += 1
+    if (linesWritten >= maxLedgerLines) compact()
+  }
+
+  /** 重写账本：只保留当前有效授权 + 撤销墓碑。 */
+  function compact() {
+    const live = load()
+    const body = live.map(grant => JSON.stringify(grant)).join('\n')
+    const header = clearedAt > 0 ? `${JSON.stringify({ v: 1, epoch: clearedAt })}\n` : ''
+    const next = header + (body ? `${body}\n` : '')
+    try {
+      writeFileSync(filePath, next, 'utf8')
+      linesWritten = header === '' ? live.length : live.length + 1
+    } catch {
+      // 压实失败：继续 append 语义，不影响正确性（只是文件会长）。
+    }
   }
 
   return {
     check,
     remember,
+    /**
+     * 这次调用**会不会**被记忆吸收。remember() 与调用方的审批文案必须都走这里。
+     *
+     * 2026-10-05 复核实证（N4/N5）：文案此前在 index.js 里独立重算判定，与
+     * remember/check 不同源 —— delete 类文案说「会记住」而 remember 必然返回
+     * not-grantable-op；.env 目标文案说「30 天免问」而 check 恒返回 protected-path。
+     * HIGH-4 要求文案与实际授予严格一致，所以判定必须只有一份实现。
+     *
+     * @returns {{ grantable: true, dir: string, opClass: string } | { grantable: false, reason: string }}
+     */
+    preview(targetPath, opClass) {
+      if (!GRANTABLE_OPS.has(opClass)) return { grantable: false, reason: 'not-grantable-op' }
+      const leaf = verifyLeaf(targetPath)
+      if (!leaf.ok) return { grantable: false, reason: leaf.reason }
+      const verified = verifyAncestors(targetPath)
+      if (!verified.ok) return { grantable: false, reason: verified.reason }
+      if (isTooBroadRoot(verified.dirKey)) return { grantable: false, reason: 'root-too-broad' }
+      if (isSelfProtected(verified.dirKey)) return { grantable: false, reason: 'protected-path' }
+      // 目录内已存在 .git/.env 之类：目录可授权，但这些文件每次仍会问。
+      // 文案必须如实反映：只承诺「不含敏感路径」。
+      if (isSelfProtected(canonicalPathKey(canonicalize(targetPath)))) return { grantable: false, reason: 'protected-path' }
+      return { grantable: true, dir: verified.dirKey, opClass }
+    },
     list() { return load().map(grant => ({ ...grant })) },
-    /** 全部清空（供设置页「撤销所有已授权目录」）。 */
+    /**
+     * 撤销全部已授权目录（供设置页「撤销所有已授权目录」）。
+     *
+     * 2026-10-05 复核实证（N2）：原实现只 `appendFileSync(filePath, '')` 写 0 字节、
+     * 再把内存置空——**重启后 load() 全量重读旧行，授权原样复活**。
+     * 「撤销」是用户拿回控制权的动作，不能只在内存里生效。
+     *
+     * 修法：写入一条 epoch 墓碑（`{v:1, epoch}`），load 时丢弃所有 `at <= epoch` 的行。
+     * 墓碑与授权同文件、append-only，不需要重写既有内容，也不需要第二个文件。
+     */
     clear() {
-      try { mkdirSync(dirname(filePath), { recursive: true }); appendFileSync(filePath, '', 'utf8') } catch { return false }
-      grants = []
+      const epoch = Date.now()
+      try {
+        mkdirSync(dirname(filePath), { recursive: true })
+        appendFileSync(filePath, `${JSON.stringify({ v: 1, epoch })}\n`, 'utf8')
+      } catch { return false }
+      // 立刻生效：墓碑之后的行才算数。先读出全部存活键，再按时间过滤。
+      grants = null
+      clearedAt = Math.max(clearedAt, epoch)
+      load()
       return true
     },
   }
