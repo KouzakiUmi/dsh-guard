@@ -29,7 +29,7 @@
  * R10 使用次数或时效超限 → 重新问一次
  */
 
-import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 
 /** 与 dsh-audit-rollback 的 canonicalPathKey 同口径：win32 下小写归一。 */
@@ -175,6 +175,9 @@ const PROTECTED_FILE_NAMES = new Set([
   'credentials', 'credentials.json', 'service-account.json', 'serviceaccount.json',
   'htpasswd', '.htpasswd', '.pgpass', 'my.cnf', 'saml.json', 'local.settings.json',
 ])
+
+/** 同账本路径的进程内共享状态（LOW-2：多实例不得各自持有陈旧缓存）。 */
+const sharedByFile = new Map()
 
 /**
  * 授权目录自身是否不可授权：路径里含受保护段，或末段形如 .env*。
@@ -330,8 +333,41 @@ export function createGrantStore(filePath, options = {}) {
 
   const grantKey = (grant) => `${grant.dir} ${grant.opClass}`
 
+  /**
+   * 同一账本路径的进程内共享状态。
+   *
+   * 2026-10-05 第三轮复核实证（LOW-2）：同 profile 开两个 DSH 窗口 = 两个 store
+   * 实例共享一份账本。此前各自持有内存缓存，任一方 compact() 都从**自己的陈旧缓存**
+   * 重写整份文件，把另一方刚写的授权一并抹掉（实测 store1 的两条被 store2 抹掉）。
+   * 原来的纯 append 最多丢一行，改成压实后变成整目录丢。
+   *
+   * approval-history.js 用「同目录共享 writer + Promise 链」串行化（异步）；
+   * 这里是同步写，等价做法是：同路径共享缓存 + 任何写操作前强制重读磁盘，
+   * 让压实永远基于**最新的**磁盘内容。
+   */
+  const shared = sharedByFile.get(canonicalPathKey(filePath)) ?? { grants: null, clearedAt: 0, lines: 0 }
+  sharedByFile.set(canonicalPathKey(filePath), shared)
+  // 本实例的本地引用指向共享状态，保证任一实例写入后其它实例立即看到。
+  let localRef = null
+
+  /** 写操作前强制从磁盘重读（只在内容可能被别人改过时调用）。 */
+  function refresh() {
+    try {
+      const stat = statSync(filePath)
+      if (shared.mtimeMs === stat.mtimeMs && shared.size === stat.size) return
+      shared.mtimeMs = stat.mtimeMs
+      shared.size = stat.size
+    } catch {
+      shared.mtimeMs = 0
+      shared.size = 0
+    }
+    shared.grants = null
+    localRef = null
+  }
+
   function load() {
-    if (grants !== null) return grants
+    if (localRef !== null) return localRef
+    if (shared.grants !== null) { localRef = shared.grants; return localRef }
     const byKey = new Map()
     let latestEpoch = 0
     let lineCount = 0
@@ -359,8 +395,17 @@ export function createGrantStore(filePath, options = {}) {
     linesWritten = lineCount
     if (latestEpoch > clearedAt) clearedAt = latestEpoch
     const live = [...byKey.values()].filter(grant => grant.at > clearedAt)
-    grants = live
-    if (grants.length > maxGrants) grants = grants.slice(grants.length - maxGrants)
+    const capped = live.length > maxGrants ? live.slice(live.length - maxGrants) : live
+    grants = capped
+    shared.grants = capped
+    shared.clearedAt = clearedAt
+    shared.lines = lineCount
+    localRef = capped
+    try {
+      const stat = statSync(filePath)
+      shared.mtimeMs = stat.mtimeMs
+      shared.size = stat.size
+    } catch { shared.mtimeMs = 0; shared.size = 0 }
     return grants
   }
   /**
@@ -372,6 +417,10 @@ export function createGrantStore(filePath, options = {}) {
   function check(rawPath, opClass) {
     if (typeof rawPath !== 'string' || rawPath === '') return { hit: false, reason: 'no-path' }
     if (!GRANTABLE_OPS.has(opClass)) return { hit: false, reason: 'not-grantable-op' }
+    // 读前重读：账本可能被**另一个 DSH 进程**或用户改动过。
+    // 共享缓存只在进程内有效，跨进程只能靠 mtime/size 判定。
+    // 成本是一次 statSync，相对本函数已有的多次 lstat+realpath 可忽略。
+    refresh()
     // R7 防线：先证明祖先链全部可信。junction/重定向一律 fail closed，
     // 词法前缀再像也不算命中。
     const verified = verifyAncestors(rawPath)
@@ -477,6 +526,8 @@ export function createGrantStore(filePath, options = {}) {
     const verdict = evaluate(rawPath, opClass)
     if (!verdict.grantable) return { ok: false, reason: verdict.reason }
     const dirKey = verdict.dir
+    // 写前重读：别的实例可能刚写了这份账本（LOW-2）。
+    refresh()
     const current = load()
     const existing = current.find(grant => grant.dir === dirKey && grant.opClass === opClass)
     // MEDIUM-6：已过期/已超限的旧记录必须允许重新写行复活，否则用户重新批准
@@ -505,7 +556,7 @@ export function createGrantStore(filePath, options = {}) {
       current.pop()            // 落盘失败则不进缓存，保持内存与磁盘一致
       return { ok: false, reason: 'write-failed' }
     }
-    linesWritten += 1
+    markWritten()
     if (linesWritten >= maxLedgerLines) compact()
     return { ok: true, reason: 'stored' }
   }
@@ -522,10 +573,22 @@ export function createGrantStore(filePath, options = {}) {
    */
   function persistCount(grant) {
     if (!writable) return
+    // 写前重读：compact() 会在此重写整份，必须基于最新磁盘内容（LOW-2）。
+    refresh()
     const line = `${JSON.stringify({ ...grant, useCount: grant.useCount })}\n`
     try { appendFileSync(filePath, line, 'utf8') } catch { return }
-    linesWritten += 1
+    markWritten()
     if (linesWritten >= maxLedgerLines) compact()
+  }
+
+  /** 记一次落盘并同步共享状态（mtime/size 用于 refresh 的快速判定）。 */
+  function markWritten() {
+    linesWritten += 1
+    try {
+      const stat = statSync(filePath)
+      shared.mtimeMs = stat.mtimeMs
+      shared.size = stat.size
+    } catch { shared.mtimeMs = 0; shared.size = 0 }
   }
 
   /**
@@ -538,6 +601,8 @@ export function createGrantStore(filePath, options = {}) {
    * 要么整份换成功，要么完全保持旧内容，不会出现半截账本。
    */
   function compact() {
+    // 写前重读：压实是**重写整份**，若基于陈旧缓存会把别的实例刚写的授权抹掉（LOW-2）。
+    refresh()
     const live = load()
     const body = live.map(grant => JSON.stringify(grant)).join('\n')
     const header = clearedAt > 0 ? `${JSON.stringify({ v: 1, epoch: clearedAt })}\n` : ''
@@ -547,6 +612,7 @@ export function createGrantStore(filePath, options = {}) {
       writeFileSync(tmp, next, 'utf8')
       renameSync(tmp, filePath)
       linesWritten = header === '' ? live.length : live.length + 1
+      markWritten()
     } catch {
       // 压实失败：旧账本原封不动，继续 append 语义。
       try { unlinkSync(tmp) } catch { /* 临时文件残留无害 */ }
@@ -578,14 +644,20 @@ export function createGrantStore(filePath, options = {}) {
      * 墓碑与授权同文件、append-only，不需要重写既有内容，也不需要第二个文件。
      */
     clear() {
-      const epoch = Date.now()
+      refresh()
+      // 墓碑必须严格大于已见到的任何墓碑，否则时钟回拨时会写出无效墓碑。
+      const epoch = Math.max(Date.now(), clearedAt + 1)
       try {
         mkdirSync(dirname(filePath), { recursive: true })
         appendFileSync(filePath, `${JSON.stringify({ v: 1, epoch })}\n`, 'utf8')
       } catch { return false }
-      // 立刻生效：墓碑之后的行才算数。先读出全部存活键，再按时间过滤。
-      grants = null
+      markWritten()
+      // 立刻生效：墓碑之后的行才算数。共享状态也一起失效，让同进程其它实例看到。
       clearedAt = Math.max(clearedAt, epoch)
+      shared.clearedAt = clearedAt
+      grants = null
+      localRef = null
+      shared.grants = null
       load()
       return true
     },

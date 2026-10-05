@@ -518,6 +518,34 @@ try {
     ok('第三轮 MEDIUM-5 时钟回拨不压死新授权')
   }
 
+  // ── 第三轮 LOW-2：两个 store 实例共享一份账本，不得互相抹掉 ───────
+  {
+    const name = 'multi-instance'
+    const ledger = grantLedgerPath(join(root, name))
+    // 上界 3：store2 的第 3 条会触发 compact()，正好是丢更新的时机
+    const store1 = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
+    const store2 = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
+    const d1 = dir(`${name}-a`)
+    const d2 = dir(`${name}-b`)
+    const p1 = file(join(d1, 'a.txt'))
+    const p2 = file(join(d2, 'b.txt'))
+    // 交替授权：两个实例各写两条，store2 最后一条触发压实
+    assert.equal(store1.remember(p1, 'edit', evidence).ok, true, 'store1 第 1 条')
+    assert.equal(store2.remember(p2, 'edit', evidence).ok, true, 'store2 第 1 条')
+    assert.equal(store1.remember(p1, 'create', evidence).ok, true, 'store1 第 2 条（不同 opClass）')
+    assert.equal(store2.remember(p2, 'create', evidence).ok, true, 'store2 第 2 条 → 触发压实')
+    // store1 写的授权不得被 store2 的压实抹掉
+    assert.equal(store1.check(p1, 'edit').hit, true, 'store1 的授权必须仍在')
+    assert.equal(store2.check(p2, 'edit').hit, true, 'store2 的授权必须仍在')
+    // 跨「重启」验证：磁盘上的内容必须完整
+    const reopened = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
+    assert.equal(reopened.check(p1, 'edit').hit, true, '重启后 store1 的授权仍在')
+    assert.equal(reopened.check(p2, 'edit').hit, true, '重启后 store2 的授权仍在')
+    assert.equal(reopened.check(p1, 'create').hit, true, '重启后 store1 的 create 授权仍在')
+    assert.equal(reopened.check(p2, 'create').hit, true, '重启后 store2 的 create 授权仍在')
+    ok('第三轮 LOW-2 多实例压实不丢对方的授权')
+  }
+
   console.log(`grant-store: ${passed} 组场景通过`)
 } finally {
   rmSync(root, { recursive: true, force: true })
