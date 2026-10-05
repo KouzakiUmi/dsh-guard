@@ -289,7 +289,18 @@ function exposeRouterRemote(ctx) {
       return queryRouterStatus(ctx)
     }
     service.history = function history(request) {
-      return queryApprovalHistory(ctx, request)
+      // typert 约定：宿主方法**直接返回业务载荷**，RPC 层负责包 {ok, value}。
+      // 此处原样返回 queryApprovalHistory 的 {ok, value}，会被传输层二次包裹成
+      // {ok:true, value:{ok:true, value:page}}，客户端解析时 page 成了信封，
+      // 抛 "Invalid approval history page"（2026-10-05 实机 Console 实证）。
+      // 与 read/grants 保持一致：成功返回载荷，失败以 throw 传递（传输层据此
+      // 合成 {ok:false, error}，业务错误码得以保留）。
+      return Promise.resolve(queryApprovalHistory(ctx, request)).then((result) => {
+        if (result.ok) return result.value
+        const error = new Error(result.error.message)
+        error.code = result.error.code
+        throw error
+      })
     }
     service.grants = function grants(request) {
       return queryGrants(ctx, request ?? {})

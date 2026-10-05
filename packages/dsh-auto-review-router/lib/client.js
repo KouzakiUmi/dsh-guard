@@ -647,10 +647,16 @@ window.__ModuleLoader__.load({
     function parseHistoryResult(value) {
       if (!plain(value) || typeof value.ok !== 'boolean') throw new TypeError('Invalid approval history result')
       if (!value.ok) {
-        if (Object.keys(value).some(key => !['ok', 'error'].includes(key)) || !plain(value.error)
-          || Object.keys(value.error).some(key => !['code', 'message'].includes(key))
-          || !['invalid-request', 'session-not-found', 'session-unavailable', 'history-unavailable'].includes(value.error.code)
-          || !text(value.error.message, 200)) throw new TypeError('Invalid approval history error')
+        // 传输层把失败包装成 RemoteError 实例：自有可枚举属性是
+        // code/details/isDSHRemoteError/name，而 message 来自 Error 构造器、
+        // 不可枚举。用 Object.keys 对 error 做严格键集比对会把它判成非法
+        // （2026-10-05 实机 Console 实证）。这里改为按属性取值校验；外层 value
+        // 的键集仍严格 —— 那是线上原样过来的 JSON，多余键必须拒绝。
+        const error = value.error
+        if (Object.keys(value).some(key => !['ok', 'error'].includes(key))
+          || error === null || typeof error !== 'object'
+          || !['invalid-request', 'session-not-found', 'session-unavailable', 'history-unavailable'].includes(error.code)
+          || !text(error.message, 200)) throw new TypeError('Invalid approval history error')
         return value
       }
       const page = value.value, health = page?.health

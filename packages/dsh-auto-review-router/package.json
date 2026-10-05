@@ -23,7 +23,7 @@
     "lib/approval-history.js"
   ],
   "scripts": {
-    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/loader-settings.mjs && node test/pending-schema.mjs && node test/manual-config.mjs && node test/configured-model-picker.mjs && node test/settings.mjs && node test/history-ui.mjs && node test/approval-history.mjs && node test/grant-store.mjs && node test/manual-fallback.mjs && node test/audit-stall.mjs && node test/failed-unload.mjs && node test/lifecycle.mjs"
+    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/loader-settings.mjs && node test/pending-schema.mjs && node test/manual-config.mjs && node test/configured-model-picker.mjs && node test/settings.mjs && node test/history-ui.mjs && node test/approval-history.mjs && node test/grant-store.mjs && node test/manual-fallback.mjs && node test/audit-stall.mjs && node test/failed-unload.mjs && node test/lifecycle.mjs && node test/remote-shape.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
