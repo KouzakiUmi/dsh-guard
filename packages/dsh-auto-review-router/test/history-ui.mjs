@@ -169,6 +169,18 @@ console.log('PASS actual history/turnTail card: safe text, dispatch stages/manua
   assert.ok(timeout.text.includes(zh.historyTimeout)); assert.ok(timeout.text.includes(zh.historyExecutionNote))
   assert.ok(card([record(7, { phase: 'reviewer', outcome: 'deny', turn: 2 })], {}, 2).text.includes(zh.history_reviewer_deny), '按轮次归属渲染')
   assert.equal(card([record(8, { phase: 'reviewer', outcome: 'deny', turn: null })]).tree, null, '无轮次归属不渲染')
+  // MEDIUM-7：授权记忆免问必须与「用户刚点了放行」区分开
+  const granted = card([record(9, { phase: 'manual', outcome: 'allowed-once', cause: 'granted-directory' })])
+  assert.ok(granted.text.includes(zh.historyTurnCardGranted), '授权记忆免问需在卡片上标明')
+  const manual = card([record(10, { phase: 'manual', outcome: 'allowed-once' })])
+  assert.equal(manual.text.includes(zh.historyTurnCardGranted), false, '用户亲自放行不得标成记忆免问')
+  // LOW-2：主卡片取 rank 最高者，不是账本序第一条。
+  const mixed = card([
+    record(11, { phase: 'reviewer', outcome: 'allow' }),
+    record(12, { phase: 'manual', outcome: 'rejected' }),
+  ])
+  assert.ok(mixed.text.includes(zh.history_manual_rejected), '主卡片必须是 rank 最高的拒绝而非 allow')
+  assert.equal(mixed.text.includes(zh.history_reviewer_allow), false, 'rank 较低者不得占据主卡片')
 }
 console.log('PASS turnTail card gates: no error/loading/empty rendering; allow/deny/timeout render per turn, one card per dispatch')
 

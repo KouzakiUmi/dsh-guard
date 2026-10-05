@@ -2,11 +2,17 @@
  * 离线自测。断言名与契约第 8.2 节一一对应，便于机械复核。
  */
 import { Buffer } from 'node:buffer'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { buildReviewContext } from '../lib/context.js'
 import './runtime.mjs'
 const { apply } = await import('../lib/index.js')
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.js'
+
+// 授权记忆的可授权性判定要求目录链可信且非敏感根；os.tmpdir() 落在
+// %LOCALAPPDATA% 下会被判为 AppData 敏感段，因此测试目录放在 D 盘根下。
+const root = mkdtempSync('D:\\dsh-selftest-')
 
 let failed = 0
 
@@ -413,8 +419,31 @@ await checkAsync('deny + ask → 官方人工请求，拒绝不放行', async ()
   assert(String(request.reason).includes('target not authorized'), request.reason)
   assert(request.displayReason?.zh?.includes('中风险'), request.displayReason?.zh)
   assert(request.displayReason?.zh?.includes('60秒未响应自动拒绝'), request.displayReason?.zh)
+  // HIGH-4：提示必须说清「会不会被记住」。本例的调用没有可授权的目标路径
+  // （exec.arguments 为空），因此只能承诺单次生效。
+  assert(/仅对这一次调用生效/.test(request.displayReason?.zh), `必须声明单次生效：${request.displayReason?.zh}`)
+  assert(!/放行后将同时记住/.test(request.displayReason?.zh), '不可授权时不得承诺会记住目录')
   assert(typeof request.displayReason?.en === 'string', '缺少英文 displayReason')
   assert(request.signal instanceof AbortSignal, '必须向官方审批传请求级取消信号')
+})
+
+// HIGH-4 正向：可授权的调用必须在提示里写明会记住什么、记多久。
+await checkAsync('可授权调用的提示必须声明将记住目录与期限', async () => {
+  const grantDir = mkdtempSync(join(root, 'grantable-'))
+  mkdirSync(join(grantDir, 'sub'), { recursive: true })
+  const { ctx } = await gate(
+    { policy: 'ask', stream() { return decisionStream('{"risk":"medium","decision":"deny","reason":"outside workspace"}') } },
+    { arguments: { file_path: join(grantDir, 'sub', 'new.txt') } },
+  )
+  const request = ctx.calls.approvals[0]
+  assert(/放行后将同时记住/.test(request.displayReason?.zh), `必须声明会记住目录：${request.displayReason?.zh}`)
+  assert(/30 天/.test(request.displayReason?.zh), '必须写明 30 天期限')
+  assert(/100 次/.test(request.displayReason?.zh), '必须写明次数上限')
+  assert(/敏感路径/.test(request.displayReason?.zh), '必须说明哪些情况仍会询问')
+  // MEDIUM-4：命令正文只进 displayReason，reason 会进持久会话事件流。
+  assert(!/file_path=/.test(String(request.reason)), `reason 不得含命令正文：${request.reason}`)
+  assert(/file_path=/.test(request.displayReason?.zh), 'displayReason 应含具体目标')
+  rmSync(root, { recursive: true, force: true })
 })
 
 await checkAsync('deny + never → 返回 kind: deny', async () => {

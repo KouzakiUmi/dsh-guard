@@ -82,7 +82,7 @@ try {
   }
   {
     const f = await fixture()
-    f.answer(request => { assert.match(request.displayReason.zh, /自动审批判断工具「.*」为高危操作，需要你决定是否放行。1秒未响应自动拒绝/); return 'allowed-once' })
+    f.answer(request => { assert.match(request.displayReason.zh, /自动审批判断工具「.*」为高危操作，需要你决定是否放行。/); assert.match(request.displayReason.zh, /1秒未响应自动拒绝/); return 'allowed-once' })
     f.tools.guard(() => 'GUARD_AFTER_MANUAL_ALLOW')
     const result = await f.run()
     assert.equal(result.isError, true); assert.equal(f.state.bodyCalls, 0); assert.equal(f.state.asks, 1)
@@ -95,6 +95,8 @@ try {
     console.log('PASS official manual allow + later guard deny; asked UUID linked without replacing Core')
   }
   // 2026-10-05 缺陷 2：人工审批提示必须带具体命令/路径，否则用户无法判断该不该批。
+  // MEDIUM-4：命令正文只进 displayReason（GUI 用），不得进 reason ——
+  // reason 会被 dsh-user-approval 写进 approval/asked 事件，即持久会话日志。
   {
     const f = await fixture({ risk: 'medium' })
     let seen = null
@@ -102,8 +104,11 @@ try {
     await f.run({ name: 'write', arguments: { file_path: temp + '\\out.txt', content: 'x' } })
     assert.ok(seen !== null, `人工审批请求已发出（asks=${f.state.asks} bodyCalls=${f.state.bodyCalls} prompts=${f.state.prompts.length}）`)
     assert.ok(/file_path=/.test(seen.displayReason.zh), `displayReason 需含具体目标：${seen.displayReason.zh}`)
-    assert.ok(seen.reason.includes('file_path='), 'reason 也带具体目标')
-    console.log('PASS manual approval prompt carries the concrete command/path (缺陷 2)')
+    assert.ok(!/file_path=/.test(String(seen.reason)), `reason 不得含命令正文：${seen.reason}`)
+    // HIGH-4：可授权的调用必须声明会记住目录与期限
+    assert.ok(/放行后将同时记住/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
+    assert.ok(/30 天/.test(seen.displayReason.zh) && /100 次/.test(seen.displayReason.zh), '必须写明期限与次数')
+    console.log('PASS manual approval prompt carries the concrete target and states the grant scope (缺陷 2 + HIGH-4 + MEDIUM-4)')
   }
   for (const options of [{ policy: 'never' }, { fallback: false }, { reviewerFailure: true }]) {
     const f = await fixture(options)
@@ -164,7 +169,8 @@ try {
     try {
       const f = await fixture({ risk: 'medium' })
       f.answer(request => {
-        assert.match(request.displayReason.zh, /中风险.*1秒未响应自动拒绝/)
+        assert.match(request.displayReason.zh, /中风险/)
+        assert.match(request.displayReason.zh, /1秒未响应自动拒绝/)
         delayAudit = true
         return 'allowed-once'
       })

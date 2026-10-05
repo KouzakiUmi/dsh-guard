@@ -8,7 +8,8 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
 import { createApprovalHistory, parseHistoryRequest, parseHistoryResult } from './approval-history.js'
-import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf, setCanonicalPath } from './grant-store.js'
+import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf,
+  verifyAncestors, isTooBroadRoot, isSelfProtected } from './grant-store.js'
 export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
@@ -450,6 +451,34 @@ const NOOP_GRANTS = {
 
 const sessionIdOf = (session) => (session && typeof session.id === 'string' ? session.id : 'unknown')
 
+/** 与 grant-store 的默认上限保持一致；文案必须说出真实数字，不能含糊。 */
+const GRANT_MAX_USES = 100
+const GRANT_MAX_AGE_DAYS = 30
+
+/**
+ * 这次人工放行**会不会**被授权记忆吸收，以及吸收的范围。
+ * 返回 null 表示「只对本次生效」——文案必须如实这么写（HIGH-4）。
+ * 判定口径与 manualFallback 里真正调用 remember 的分支逐条一致，
+ * 否则就会出现「提示说会记住、实际没记」或反过来的错配。
+ */
+function grantableOutcome(exec, config) {
+  if (!config.manualFallback) return null
+  const target = targetPathOf(exec.arguments)
+  const opClass = operationClassOf(exec.name, exec.arguments)
+  if (target === undefined || opClass === undefined) return null
+  // 与 remember 走同一套判定：祖先链不可信、目录过宽、敏感路径时都不会落记忆，
+  // 此时提示必须说「仅本次生效」，不能承诺一个不会发生的记忆。
+  const verified = verifyAncestors(target)
+  if (!verified.ok) return null
+  if (isTooBroadRoot(verified.dirKey) || isSelfProtected(verified.dirKey)) return null
+  const opLabel = opClass === 'create' ? { en: 'file creation', zh: '新建文件' } : { en: 'file edit', zh: '编辑文件' }
+  return {
+    scopeText: { en: `${opLabel.en} under ${target}`, zh: `${opLabel.zh} · ${target}` },
+    days: GRANT_MAX_AGE_DAYS,
+    maxUses: GRANT_MAX_USES,
+  }
+}
+
 async function manualFallback(ctx, config, state, exec, decision, history, entry) {
   const { risk, reason } = decision
   // effectivePolicy includes the configured default; overrideOf alone can miss never.
@@ -502,13 +531,27 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
   const summary = summarizeCall(exec)
   const riskLabel = risk === 'high' ? { en: 'high', zh: '高危' } : { en: 'medium', zh: '中风险' }
   const detail = summary === undefined ? '' : `\n${summary}`
+  // HIGH-4：文案必须与实际授予一致。用户若不知道「放行会记住这个目录」，
+  // 就在毫不知情的情况下签了一份 30 天 / 100 次 / 整棵子树的授权。
+  // 以下三点必须同时出现在提示里：具体命令、会记住什么、记住多久。
+  const grant = grantableOutcome(exec, config)
+  const grantLine = grant === null ? {
+    en: 'This decision applies to this single call only — nothing will be remembered.',
+    zh: '本次决定仅对这一次调用生效，不会被记住。',
+  } : {
+    en: `Allowing it will also remember ${grant.scopeText.en}: the same kind of operation in that directory will not ask again for ${grant.days} days (up to ${grant.maxUses} times). Sensitive paths (.git, .env, credentials) and delete operations always ask again.`,
+    zh: `放行后将同时记住${grant.scopeText.zh}：该目录下的同类操作 ${grant.days} 天内不再询问（最多 ${grant.maxUses} 次）。敏感路径（.git、.env、凭据目录）与删除操作每次仍会询问。`,
+  }
   try {
     const response = await history.invokeManual(entry, () => ctx.approval.request({
       agent: exec.agent, toolName: exec.name, callId: exec.callId,
-      reason: `${askUser(exec.name, reason).reason}${summary === undefined ? '' : ` — ${summary}`}`,
+      // MEDIUM-4：reason 会被 dsh-user-approval 原样 append 进 approval/asked 事件，
+      // 即持久会话日志，下一轮 reviewer 会读到它。这里只放风险与类别，
+      // 命令正文只走 displayReason（GUI 用），不进会话事件流。
+      reason: askUser(exec.name, reason).reason,
       displayReason: {
-        en: `Automatic review classified this ${riskLabel.en}-risk call to "${exec.name}" as needing a human decision. Allow once? No response within ${seconds} seconds means rejection.${detail}`,
-        zh: `自动审批判断工具「${exec.name}」为${riskLabel.zh}操作，需要你决定是否放行。${seconds}秒未响应自动拒绝。${detail}`,
+        en: `Automatic review classified this ${riskLabel.en}-risk call to "${exec.name}" as needing a human decision.${detail}\n\n${grantLine.en}\n\nNo response within ${seconds} seconds means rejection.`,
+        zh: `自动审批判断工具「${exec.name}」为${riskLabel.zh}操作，需要你决定是否放行。${detail}\n\n${grantLine.zh}\n\n${seconds}秒未响应自动拒绝。`,
       },
       signal: controller.signal,
     }))

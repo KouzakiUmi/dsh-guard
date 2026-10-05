@@ -63,7 +63,13 @@ function inspect(stateDir, entries, g) {
   if (!after) reason ||= 'PREIMAGE_ONLY_NO_POSTIMAGE'
   if (g.captures.some(({ e, index }) => !entries.slice(index + 1).some((end) => end.kind === 'turn/end' && end.session === e.session && end.turn === e.turn))) reason ||= 'TURN_NOT_ENDED'
   if (before && !Array.isArray(before.guards)) reason ||= 'LEGACY_CAPTURE_NO_PATH_IDENTITY'
-  if (before && after && !same(before.guards, after.guards)) reason ||= 'BASELINE_ANCESTOR_CHANGED'
+  // 2026-10-05 修正（HIGH-5）：before 若因「祖先目录当时尚不存在」而 guards 为空
+  // （pathGuards 的 missing 分支，existed=false），这是正常的新建目录场景，
+  // 不是祖先被换。旧口径直接 same() 比对，[] 对不上完整链，
+  // 导致新建目录下的文件永远 canRestore=false —— 正是 MEDIUM-6 声称修复却没修到的点。
+  // 判据：before.existed === false 且 before.guards 为空 → 跳过基线比对。
+  const beforeBaselineEmpty = before?.existed === false && Array.isArray(before.guards) && before.guards.length === 0
+  if (before && after && !beforeBaselineEmpty && !same(before.guards, after.guards)) reason ||= 'BASELINE_ANCESTOR_CHANGED'
   if (g.captures.some(({ e }) => e.phase === 'before' && !g.captures.some(({ e: post }) => post.phase === 'after' && post.turn === e.turn))) reason ||= 'INCOMPLETE_TURN_CAPTURE'
   // Full-only applies to EVERY captured image, not just the displayed endpoints.
   let historyComplete = true
@@ -82,7 +88,8 @@ function inspect(stateDir, entries, g) {
     for (const pair of pairs.values()) {
       if (!pair.before || !pair.after || pair.before.index >= pair.after.index) throw new Error('INCOMPLETE_TURN_CAPTURE')
       if (!entries.slice(pair.after.index + 1).some((e) => e.kind === 'turn/end' && e.session === pair.after.e.session && e.turn === pair.after.e.turn)) throw new Error('TURN_NOT_ENDED')
-      if (previous && (previous.existed !== pair.before.e.existed || previous.hash !== pair.before.e.hash || !same(previous.guards, pair.before.e.guards))) throw new Error('DISCONTINUOUS_CAPTURE_HISTORY')
+      if (previous && (previous.existed !== pair.before.e.existed || previous.hash !== pair.before.e.hash
+        || !same(previous.guards, pair.before.e.guards))) throw new Error('DISCONTINUOUS_CAPTURE_HISTORY')
       previous = pair.after.e
     }
     if (g.calls.some((call) => !pairs.has(call.turn))) throw new Error('UNCAPTURED_TOOL_TARGET')

@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
       historyEmpty: '当前会话没有审批记录。', historyNoSession: '请先选择会话。', historyBlank: '请先开始会话。', historyGap: '历史可能不完整或不可用，请检查审计健康状态。',
       historyServiceUnavailable: '无法调用审批历史服务：Host 端插件未加载、RPC 未挂载，或返回内容不合法。这不是账本读取失败——账本本身可能完好。请检查 dsh-auto-review-router 是否处于启用状态，并查看宿主日志。',
       historyTurnCardMore: '条同类结果',
+      historyTurnCardGranted: '（命中已授权目录，未询问）',
       historyRisk: '风险', historyRoute: '审查路由', historyLocation: '轮次 / 步骤 / 调用', historyUnknown: '未知', historyUnlinked: '未建立唯一调用关联', historyInspect: '在轨迹中查看调用', historyOlder: '加载更早记录', historyTimeout: '人工审批超时，已拒绝',
       historyPhase_reviewer: '自动审查', historyPhase_downstream: '权限审批', historyPhase_manual: '人工审批', 'historyPhase_reported-result': '工具执行报告',
       history_reviewer_allow: '审查允许（不代表执行）', history_reviewer_deny: '审查拒绝', history_reviewer_failure: '审查失败', history_reviewer_cancel: '审查取消',
@@ -89,6 +90,7 @@ window.__ModuleLoader__.load({
       historyEmpty: 'No approval records for this session.', historyNoSession: 'Select a session first.', historyBlank: 'Start a conversation first.', historyGap: 'History may be incomplete or unavailable; check audit health.',
       historyServiceUnavailable: 'Cannot reach the approval history service: the host plugin is not loaded, the RPC is not mounted, or the response failed validation. This is not a ledger read failure — the ledger itself may be intact. Check that dsh-auto-review-router is enabled and inspect the host log.',
       historyTurnCardMore: 'more like this',
+      historyTurnCardGranted: '(matched a granted directory; not asked again)',
       historyRisk: 'Risk', historyRoute: 'Reviewer route', historyLocation: 'Turn / step / call', historyUnknown: 'Unknown', historyUnlinked: 'No verified unique call association', historyInspect: 'Inspect call in trajectory', historyOlder: 'Load earlier records', historyTimeout: 'Manual approval timed out; rejected',
       historyPhase_reviewer: 'Auto review', historyPhase_downstream: 'Permission approval', historyPhase_manual: 'Manual approval', 'historyPhase_reported-result': 'Reported tool result',
       history_reviewer_allow: 'Review allowed (not execution)', history_reviewer_deny: 'Review denied', history_reviewer_failure: 'Review failed', history_reviewer_cancel: 'Review cancelled',
@@ -718,9 +720,17 @@ window.__ModuleLoader__.load({
       }
       const shown = [...byDispatch.values()].map(turnCardRow).filter(row => row !== null)
       if (!shown.length) return null
-      const latest = shown[0]
+      // LOW-2：shown 是 Map 的插入序（账本序），不能直接取 [0]。
+      // 主卡片必须是 rank 最高的那次调用，否则会标错「latest」。
+      const latest = [...shown].sort((a, b) => {
+        const rank = (TURN_CARD_RANK[`${a.phase}:${a.outcome}`] ?? 6) - (TURN_CARD_RANK[`${b.phase}:${b.outcome}`] ?? 6)
+        return rank !== 0 ? rank : b.ledgerSeq - a.ledgerSeq
+      })[0]
       return h('div', { role: 'status', style: { padding: '4px 8px', overflowWrap: 'anywhere' } },
         `${safeText(latest.toolName, 160)} · ${t('historyPhase_' + latest.phase)}: ${outcomeText(latest, t)} · ${t('historyExecutionNote')}`,
+        // MEDIUM-7：授权记忆免问与「用户刚点了放行」在 outcome 上同形，
+        // 必须靠 cause 区分，否则用户不知道自己刚授予了一个目录。
+        latest.cause === 'granted-directory' ? ` · ${t('historyTurnCardGranted')}` : null,
         shown.length > 1 ? ` · +${shown.length - 1} ${t('historyTurnCardMore')}` : null,
       )
     }
