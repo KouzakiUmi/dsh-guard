@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, existsSync, rmSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createGrantStore, targetPathOf, operationClassOf, grantLedgerPath,
-  isProtectedTarget, isTooBroadRoot, verifyAncestors, isInside } from '../lib/grant-store.js'
+  isProtectedTarget, isTooBroadRoot, verifyAncestors, isInside, canonicalPathKey } from '../lib/grant-store.js'
 
 // 不用 os.tmpdir()：它落在 %LOCALAPPDATA%\Temp 下，而 AppData 是授权记忆的
 // 敏感段（MEDIUM-1 修复），会把 fixture 判成过宽根。改用 D 盘根下的
@@ -544,6 +544,61 @@ try {
     assert.equal(reopened.check(p1, 'create').hit, true, '重启后 store1 的 create 授权仍在')
     assert.equal(reopened.check(p2, 'create').hit, true, '重启后 store2 的 create 授权仍在')
     ok('第三轮 LOW-2 多实例压实不丢对方的授权')
+  }
+
+  // ── 端到端：首次询问 → 放行 → 免问 → 敏感仍问 → 重启 → 撤销 ────
+  // 前面各组都是单点验证；这一组按用户真实遇到的顺序串一遍，
+  // 防止「每一步都对但串起来不对」（跨组状态残留、顺序依赖）。
+  {
+    const name = 'e2e'
+    const profile = join(root, name)
+    const d = dir(`${name}-proj`)
+    const main = file(join(d, 'app.js'))
+    const s = createGrantStore(grantLedgerPath(profile))
+    const ev = { session: 'e2e', tool: 'edit', approvalRequestId: 'e2e-req' }
+
+    // 1. 首次：会询问，文案承诺的范围要具体到目录
+    assert.equal(s.check(main, 'edit').hit, false, '首次必须询问')
+    const first = s.preview(main, 'edit')
+    assert.equal(first.grantable, true, '普通目标可授权')
+    assert.equal(first.dirPath, join(d), `preview 必须给出磁盘真实路径（实际 ${first.dirPath}）`)
+
+    // 2. 放行
+    assert.equal(s.remember(main, 'edit', ev).ok, true, '放行应写入')
+
+    // 3. 同目录其它文件免问
+    const other = file(join(d, 'other.js'))
+    assert.equal(s.check(other, 'edit').hit, true, '同目录其它文件免问')
+
+    // 4. 敏感文件仍每次问
+    for (const name_ of ['.env', 'id_rsa', '.npmrc']) {
+      const p = file(join(d, name_))
+      const r = s.check(p, 'edit')
+      assert.equal(r.hit, false, `${name_} 仍须每次询问（实际 ${JSON.stringify(r)}）`)
+      assert.equal(r.reason, 'protected-path', `${name_} 应报 protected-path`)
+    }
+
+    // 5. 目录外不记忆
+    const outside = file(join(dir(`${name}-outside`), 'x.js'))
+    assert.equal(s.check(outside, 'edit').hit, false, '目录外不记忆')
+
+    // 6. 重启后仍免问
+    const reopened = createGrantStore(grantLedgerPath(profile))
+    assert.equal(reopened.check(main, 'edit').hit, true, '跨重启免问')
+    assert.equal(reopened.check(outside, 'edit').hit, false, '跨重启后目录外仍不记忆')
+
+    // 7. 撤销后重新询问（跨重启）
+    assert.equal(reopened.clear(), true)
+    const afterRevoke = createGrantStore(grantLedgerPath(profile))
+    assert.equal(afterRevoke.check(main, 'edit').hit, false, '撤销后重新询问')
+    assert.equal(afterRevoke.check(other, 'edit').hit, false, '撤销后同目录其它文件也重新询问')
+
+    // 8. 账本结构：授权行 + 计数行 + 墓碑
+    const rows = readFileSync(grantLedgerPath(profile), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+    assert.ok(rows.some(row => row.epoch !== undefined), '必须留下撤销墓碑')
+    assert.ok(rows.filter(row => row.epoch === undefined).every(row => row.dir === canonicalPathKey(join(d))),
+      '授权行的 dir 必须是归一化键')
+    ok('端到端：询问 → 放行 → 免问 → 敏感仍问 → 重启 → 撤销')
   }
 
   console.log(`grant-store: ${passed} 组场景通过`)
