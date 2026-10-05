@@ -444,10 +444,13 @@ await checkAsync('可授权调用的提示必须声明将记住目录与期限',
     { arguments: { file_path: join(grantDir, 'sub', 'new.txt') } },
   )
   const request = ctx.calls.approvals[0]
-  assert(/放行后将同时记住/.test(request.displayReason?.zh), `必须声明会记住目录：${request.displayReason?.zh}`)
+  assert(/放行后将同时授予一项长期授权/.test(request.displayReason?.zh), `必须声明会记住目录：${request.displayReason?.zh}`)
   assert(/30 天/.test(request.displayReason?.zh), '必须写明 30 天期限')
   assert(/100 次/.test(request.displayReason?.zh), '必须写明次数上限')
   assert(/敏感路径/.test(request.displayReason?.zh), '必须说明哪些情况仍会询问')
+  // 文案必须把路径说清楚（用户要能核对授权的是哪个目录）
+  assert(new RegExp(`${grantDir.replace(/\\/g, '\\\\')}`).test(request.displayReason?.zh),
+    `文案必须含具体授权目录：${request.displayReason?.zh}`)
   // MEDIUM-4：命令正文只进 displayReason，reason 会进持久会话事件流。
   assert(!/file_path=/.test(String(request.reason)), `reason 不得含命令正文：${request.reason}`)
   assert(/file_path=/.test(request.displayReason?.zh), 'displayReason 应含具体目标')

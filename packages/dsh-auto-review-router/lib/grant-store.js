@@ -116,7 +116,9 @@ export function verifyAncestors(targetPath) {
     if (parent === dir) return { ok: false, reason: 'walk-stalled' }
     dir = parent
   }
-  return { ok: true, dirKey: canonicalPathKey(dirname(resolved)) }
+  // dirKey 是归一化键（win32 转小写），用于比较；dirPath 保留磁盘上的真实大小写，
+  // 只用于展示 —— 让用户在审批弹窗里看到的路径与磁盘上的一模一样，便于核对。
+  return { ok: true, dirKey: canonicalPathKey(dirname(resolved)), dirPath: dirname(resolved) }
 }
 
 /** 目标所在卷（win32 盘符或 POSIX 挂载点），跨卷不记忆（R9）。 */
@@ -511,7 +513,7 @@ export function createGrantStore(filePath, options = {}) {
     if (isSelfProtected(canonicalPathKey(canonicalize(targetPath)))) {
       return { grantable: false, reason: 'protected-path' }
     }
-    return { grantable: true, dir: verified.dirKey, opClass }
+    return { grantable: true, dir: verified.dirKey, dirPath: verified.dirPath, opClass }
   }
 
   function remember(rawPath, opClass, evidence) {

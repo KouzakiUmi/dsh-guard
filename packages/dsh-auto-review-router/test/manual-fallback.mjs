@@ -106,7 +106,7 @@ try {
     assert.ok(/file_path=/.test(seen.displayReason.zh), `displayReason 需含具体目标：${seen.displayReason.zh}`)
     assert.ok(!/file_path=/.test(String(seen.reason)), `reason 不得含命令正文：${seen.reason}`)
     // HIGH-4：可授权的调用必须声明会记住目录与期限
-    assert.ok(/放行后将同时记住/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
+    assert.ok(/放行后将同时授予一项长期授权/.test(seen.displayReason.zh), `必须声明会记住目录：${seen.displayReason.zh}`)
     assert.ok(/30 天/.test(seen.displayReason.zh) && /100 次/.test(seen.displayReason.zh), '必须写明期限与次数')
     console.log('PASS manual approval prompt carries the concrete target and states the grant scope (缺陷 2 + HIGH-4 + MEDIUM-4)')
   }

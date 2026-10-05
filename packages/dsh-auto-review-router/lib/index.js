@@ -476,7 +476,11 @@ function grantableOutcome(exec, config, store) {
   if (!verdict.grantable) return null
   const opLabel = opClass === 'create' ? { en: 'file creation', zh: '新建文件' } : { en: 'file edit', zh: '编辑文件' }
   return {
-    scopeText: { en: `${opLabel.en} under ${verdict.dir}`, zh: `${opLabel.zh} · ${verdict.dir}` },
+    // 以路径为主语、操作为限定：拼成「D:\proj\config 下的文件编辑」才通顺。
+    // 用 dirPath（磁盘真实大小写）而非 dir（win32 下被归一成小写），
+    // 用户核对授权范围时才不会看到与磁盘不一致的大小写。
+    scopeText: { en: `${opLabel.en} under ${verdict.dirPath ?? verdict.dir}`,
+      zh: `${verdict.dirPath ?? verdict.dir} 下的${opLabel.zh}` },
     days: GRANT_MAX_AGE_DAYS,
     maxUses: GRANT_MAX_USES,
   }
@@ -542,8 +546,8 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
     en: 'This decision applies to this single call only — nothing will be remembered.',
     zh: '本次决定仅对这一次调用生效，不会被记住。',
   } : {
-    en: `Allowing it will also remember ${grant.scopeText.en}: the same kind of operation in that directory will not ask again for ${grant.days} days (up to ${grant.maxUses} times). Sensitive paths (.git, .env, credentials) and delete operations always ask again.`,
-    zh: `放行后将同时记住${grant.scopeText.zh}：该目录下的同类操作 ${grant.days} 天内不再询问（最多 ${grant.maxUses} 次）。敏感路径（.git、.env、凭据目录）与删除操作每次仍会询问。`,
+    en: `Allowing it will also remember this grant: ${grant.scopeText.en} will not ask again for ${grant.days} days (up to ${grant.maxUses} times). Sensitive paths (.git, .env, credentials) and delete operations always ask again.`,
+    zh: `放行后将同时授予一项长期授权：${grant.scopeText.zh} 在 ${grant.days} 天内不再询问（最多 ${grant.maxUses} 次）。敏感路径（.git、.env、凭据目录）与删除操作每次仍会询问。`,
   }
   try {
     const response = await history.invokeManual(entry, () => ctx.approval.request({
