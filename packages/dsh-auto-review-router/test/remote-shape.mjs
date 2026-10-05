@@ -9,11 +9,16 @@
 // 这个套件存在的意义：此前没有任何测试断言过 service.* 的返回形状。
 import './runtime.mjs'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 const { apply, queryApprovalHistory, queryRouterStatus, queryGrants } = await import('../lib/index.js')
 
-const profileDir = mkdtempSync('D:\\dsh-remote-shape-')
+// 平台自适应：Windows 用 D 盘根（避开 %LOCALAPPDATA% 的 AppData 敏感段，
+// 否则 profile 会被判不可授权）；其它平台用系统临时目录。硬编码 D:\ 在
+// Linux 上不是绝对路径，本套件在 CI 上就是这么红过一次。
+const isWin = process.platform === 'win32'
+const profileDir = mkdtempSync(join(isWin ? 'D:\\' : tmpdir(), 'dsh-remote-shape-'))
 process.on('exit', () => { try { rmSync(profileDir, { recursive: true, force: true }) } catch { /* 尽力 */ } })
 
 let service = null
