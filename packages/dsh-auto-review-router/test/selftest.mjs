@@ -575,6 +575,11 @@ await checkAsync('授权撤销入口可读可撤', async () => {
   assert(reopened.check(file, 'edit').hit === false, '撤销后重启不得再命中（墓碑必须跨重启生效）')
 })
 
+// profileDir 必须在最后清理：撤销用例（上面）仍在用它建 store。
+// 此前只删了 root，漏掉 profileDir —— 每跑一次就在 D 盘根留一个
+// dsh-selftest-profile-* 目录，实测累积了 20 个。
+rmSync(profileDir, { recursive: true, force: true })
+
 if (failed > 0) {
   console.error(`selftest: ${failed} 项失败`)
   process.exit(1)
