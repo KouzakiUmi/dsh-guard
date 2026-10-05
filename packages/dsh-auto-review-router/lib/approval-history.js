@@ -161,6 +161,10 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
       bytes = await fs.readFile(path, 'utf8')
     } catch (error) {
       if (error.code === 'ENOENT') return { records: [], nextSeq: 0, writable: true, size: 0, mtimeMs: null, ino: null }
+      // ENOTDIR（Linux 对「路径中间段是文件」的错误码；Windows 同样场景报 ENOENT）归类为
+      // 「账本目录被非目录占位」：不是全新健康账本，也不是读取失败。blocked 标记让读侧
+      // 降级为空页 + 真实 gap，写侧保持可见失败；不得伪装成 healthy 空账本。
+      if (error.code === 'ENOTDIR') return { records: [], nextSeq: 0, writable: false, blocked: true, size: 0, mtimeMs: null, ino: null }
       throw error
     }
     const records = [], seenIds = new Set()
@@ -209,6 +213,7 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
         }
         file ??= await load(record.sessionId, () => !stale())
         if (stale()) return false
+        if (file.blocked) throw Object.assign(new Error('ledger path blocked by a non-directory'), { code: 'AUDIT_LEDGER_NOTDIR' })
         if (!file.writable) throw Object.assign(new Error('corrupt ledger'), { code: 'AUDIT_CORRUPT_RECORD' })
         const row = parseHistoryRecord({ ...record, ledgerSeq: file.nextSeq })
         const line = `${JSON.stringify(row)}\n`, bytes = Buffer.byteLength(line)
@@ -394,6 +399,12 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
       queryTimeoutMs,
       () => { loadTimedOut = true; gap('AUDIT_READ_TIMEOUT', 'readFailures') })
     if (!settled || !file) return failure('history-unavailable')
+    // 账本目录被非目录占位（ENOTDIR 归类）：查询降级为空页而不是 history-unavailable，
+    // health.gap/readFailures/lastErrorCode 如实反映这次初始化失败类故障。
+    if (file.blocked) {
+      gap('AUDIT_LEDGER_NOTDIR', 'readFailures')
+      return { ok: true, value: { records: [], nextCursor: null, health: { ...health } } }
+    }
     const candidates = file.records.filter(row => row.ledgerSeq < before).reverse()
     const records = candidates.slice(0, parsed.limit)
     const nextCursor = candidates.length > records.length

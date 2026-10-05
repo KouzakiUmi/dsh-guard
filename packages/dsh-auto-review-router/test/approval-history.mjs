@@ -123,7 +123,27 @@ try {
     await limitedQueue.result.drain()
     assert.equal(limitedQueue.result.health().lastErrorCode, 'AUDIT_QUEUE_LIMIT')
   }
-  console.log('PASS ENOSPC contained; runtime file-size cap and queue bounds visibly report gaps without admission decisions')
+  {
+    // ENOTDIR（Linux 对「路径中间段是文件」的错误码；Windows 同场景报 ENOENT）平台无关注入回归：
+    // 归类为「账本目录被非目录占位」——查询降级 ok=true + 空页 + 真实 gap，写入保持可见失败，
+    // 不得伪装成 healthy 全新空账本，也不得升级成 history-unavailable。
+    const notdirFs = { ...fs, stat: async () => { throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR' }) } }
+    const blocked = store('notdir', { fs: notdirFs })
+    const entry = blocked.result.begin(execution(a, 'notdir-call'))
+    assert.equal(blocked.result.record(entry, 'reviewer', 'allow'), true)
+    await blocked.result.drain()
+    assert.equal(blocked.result.health().writeFailures, 1, '写入路径必须保持失败可见')
+    assert.equal(blocked.result.health().lastErrorCode, 'AUDIT_LEDGER_NOTDIR')
+    const page = await blocked.result.history({ sessionId: a.id })
+    assert.equal(page.ok, true, 'ENOTDIR 查询必须降级而非 history-unavailable')
+    assert.deepEqual(page.value.records, [])
+    assert.equal(page.value.health.gap, true, '必须记 gap，不得伪装成健康空账本')
+    assert.equal(page.value.health.readFailures, 1)
+    assert.equal(page.value.health.lastErrorCode, 'AUDIT_LEDGER_NOTDIR')
+    assert.equal(page.value.health.missingProfile, false, 'profile 存在，不是 missingProfile')
+    assert.equal(page.value.nextCursor, null)
+  }
+  console.log('PASS ENOSPC contained; runtime file-size cap and queue bounds visibly report gaps without admission decisions; ENOTDIR classified as blocked ledger (degraded read, visible write failure)')
 
   {
     const other = store('identities'), e = other.result.begin(execution(a, 'overlap-call'))
