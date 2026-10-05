@@ -195,7 +195,36 @@ window.__ModuleLoader__.load({
             codec: statusCodec('dsh-auto-review-router#ApprovalHistoryRequest', parseHistoryRequest) }],
           result: statusCodec('dsh-auto-review-router#ApprovalHistoryResult', parseHistoryResult),
         },
+        {
+          id: 'dsh-auto-review-router#autoReviewRouter/grants',
+          service: 'autoReviewRouter', namespace: 'autoReviewRouter', method: 'grants',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'request', wire: 'request', source: 'json',
+            codec: statusCodec('dsh-auto-review-router#GrantsRequest', parseGrantsRequest) }],
+          result: statusCodec('dsh-auto-review-router#GrantsResult', parseGrantsResult),
+        },
       ],
+    }
+    // Browser-side mirrors of the Host parsers. No Node module import; same fail-closed contract.
+    function parseGrantsRequest(value) {
+      if (value === undefined || value === null) return { revoke: false }
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_GRANTS_REQUEST')
+      if (value.revoke !== undefined && typeof value.revoke !== 'boolean') throw new Error('INVALID_GRANTS_REQUEST')
+      return { revoke: value.revoke === true }
+    }
+    function parseGrantsResult(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_GRANTS_RESULT')
+      if (typeof value.available !== 'boolean' || typeof value.revoked !== 'boolean') throw new Error('INVALID_GRANTS_RESULT')
+      if (!Array.isArray(value.grants)) throw new Error('INVALID_GRANTS_RESULT')
+      for (const grant of value.grants) {
+        if (grant === null || typeof grant !== 'object' || Array.isArray(grant)) throw new Error('INVALID_GRANT_ENTRY')
+        if (typeof grant.dir !== 'string' || grant.dir === '' || grant.dir.length > 1024) throw new Error('INVALID_GRANT_DIR')
+        if (grant.opClass !== 'create' && grant.opClass !== 'edit') throw new Error('INVALID_GRANT_OPCLASS')
+        if (typeof grant.tool !== 'string' || grant.tool.length > 160) throw new Error('INVALID_GRANT_TOOL')
+        if (!Number.isSafeInteger(grant.at) || grant.at < 0) throw new Error('INVALID_GRANT_AT')
+        if (!Number.isSafeInteger(grant.useCount) || grant.useCount < 0) throw new Error('INVALID_GRANT_USECOUNT')
+      }
+      return value
     }
     function statusCodec(typeSymbol, parse) {
       return { mode: 'strict', typeSymbol, schema: { parse }, create: () => ({ parse }) }

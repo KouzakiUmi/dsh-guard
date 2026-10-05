@@ -195,7 +195,42 @@ export const routerStatusRemote = {
         codec: statusCodec('dsh-auto-review-router#ApprovalHistoryRequest', parseHistoryRequest) }],
       result: statusCodec('dsh-auto-review-router#ApprovalHistoryResult', parseHistoryResult),
     },
+    {
+      id: 'dsh-auto-review-router#autoReviewRouter/grants',
+      service: 'autoReviewRouter',
+      namespace: 'autoReviewRouter',
+      method: 'grants',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'request', wire: 'request', source: 'json',
+        codec: statusCodec('dsh-auto-review-router#GrantsRequest', parseGrantsRequest) }],
+      result: statusCodec('dsh-auto-review-router#GrantsResult', parseGrantsResult),
+    },
   ],
+}
+
+/** Grants 视图的入参/出参校验。与 history 同样 fail-closed：形状不对就抛。 */
+function parseGrantsRequest(value) {
+  if (value === undefined || value === null) return { revoke: false }
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid auto-review-router grants request')
+  if (value.revoke !== undefined && typeof value.revoke !== 'boolean') throw new Error('Invalid auto-review-router grants.revoke')
+  return { revoke: value.revoke === true }
+}
+
+function parseGrantsResult(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid auto-review-router grants result')
+  const { available, reason, grants, revoked } = value
+  if (typeof available !== 'boolean' || typeof revoked !== 'boolean') throw new Error('Invalid auto-review-router grants flags')
+  if (reason !== null && reason !== undefined && typeof reason !== 'string') throw new Error('Invalid auto-review-router grants.reason')
+  if (!Array.isArray(grants)) throw new Error('Invalid auto-review-router grants.grants')
+  for (const grant of grants) {
+    if (grant === null || typeof grant !== 'object' || Array.isArray(grant)) throw new Error('Invalid auto-review-router grant entry')
+    if (typeof grant.dir !== 'string' || grant.dir.length === 0 || grant.dir.length > 1024) throw new Error('Invalid grant.dir')
+    if (grant.opClass !== 'create' && grant.opClass !== 'edit') throw new Error('Invalid grant.opClass')
+    if (typeof grant.tool !== 'string' || grant.tool.length > 160) throw new Error('Invalid grant.tool')
+    if (!Number.isSafeInteger(grant.at) || grant.at < 0) throw new Error('Invalid grant.at')
+    if (!Number.isSafeInteger(grant.useCount) || grant.useCount < 0) throw new Error('Invalid grant.useCount')
+  }
+  return value
 }
 
 /** Read-only business DTO; no Agent lookup and no cold-session activation. */

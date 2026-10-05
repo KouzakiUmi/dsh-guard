@@ -223,6 +223,61 @@ ok('status codec Host/Client 互反一致：接受值双方同接受，拒绝值
   }
 })
 
+// 2026-10-05：新增 grants 方法时漏了 descriptors 条目 —— service 上有绑定函数、
+// markDirectRemote 也打了标记，但没有 typert 描述符，传输层根本不路由，
+// 客户端调用永远失败。这类「接了 Host 没接 transport」的错必须有测试兜住。
+{
+  let clientExports
+  vm.runInNewContext(readFileSync(join(testDir, '..', 'lib', 'client.js'), 'utf8'), {
+    window: { __ModuleLoader__: { load({ factory }) { clientExports = factory(() => ({ createElement() {} })) } } },
+    console: { info() {}, warn() {}, error() {} }, setTimeout, clearTimeout, AbortController, Date, Promise,
+  })
+  const hostMethods = routerStatusRemote.descriptors.map(d => d.method).sort()
+  const clientMethods = clientExports.statusRemote.descriptors.map(d => d.method).sort()
+  assert.deepEqual([...hostMethods], ['grants', 'history', 'read'], 'host 描述符必须覆盖全部方法')
+  // 跨 VM 比较：数组原型不同，deepEqual 不可用，逐项比字符串。
+  assert.equal(clientMethods.join(','), hostMethods.join(','), 'client 与 host 的 remote 方法集必须一致')
+
+  // 每个描述符都要有真正的 parse 校验器（无校验的描述符等于没 fail-closed）
+  for (const descriptor of routerStatusRemote.descriptors) {
+    assert.equal(typeof descriptor.result?.schema?.parse, 'function', `${descriptor.method} 缺出参校验`)
+    for (const param of descriptor.parameters ?? []) {
+      assert.equal(typeof param.codec?.schema?.parse, 'function', `${descriptor.method}.${param.name} 缺入参校验`)
+    }
+  }
+  const grantsParse = routerStatusRemote.descriptors.find(d => d.method === 'grants').result.schema.parse
+  const grantsReqParse = routerStatusRemote.descriptors.find(d => d.method === 'grants').parameters[0].codec.schema.parse
+  assert.equal(grantsReqParse(undefined).revoke, false, '缺省请求等价于只读')
+  assert.equal(grantsReqParse({ revoke: true }).revoke, true)
+  const validGrants = { available: true, reason: null, revoked: false,
+    grants: [{ dir: 'd:\\p', opClass: 'edit', tool: 'edit', at: 1, useCount: 2 }] }
+  assert.doesNotThrow(() => grantsParse(validGrants), '合法 grants 必须被接受')
+  const badGrants = [
+    ['缺 available', { revoked: false, grants: [] }],
+    ['缺 revoked', { available: true, grants: [] }],
+    ['grants 非数组', { available: true, revoked: false, grants: {} }],
+    ['条目 opClass 非法', { available: true, revoked: false, grants: [{ dir: 'd:\\p', opClass: 'delete', tool: 'edit', at: 1, useCount: 0 }] }],
+    ['useCount 非整数', { available: true, revoked: false, grants: [{ dir: 'd:\\p', opClass: 'edit', tool: 'edit', at: 1, useCount: -1 }] }],
+    ['dir 为空', { available: true, revoked: false, grants: [{ dir: '', opClass: 'edit', tool: 'edit', at: 1, useCount: 0 }] }],
+  ]
+  for (const [label, value] of badGrants) {
+    assert.throws(() => grantsParse(value), undefined, `grants 必须拒绝：${label}`)
+  }
+  assert.throws(() => grantsReqParse({ revoke: 'yes' }), undefined, 'grants 请求必须拒绝非布尔 revoke')
+
+  // 客户端必须有自己的等价校验器（浏览器侧不能 import Node 模块），
+  // 且与 Host 同口径：同样的坏输入，两端都必须拒。
+  const clientGrants = clientExports.statusRemote.descriptors.find(d => d.method === 'grants')
+  const clientParseGrants = clientGrants.result.schema.parse
+  const clientParseReq = clientGrants.parameters[0].codec.schema.parse
+  assert.doesNotThrow(() => clientParseGrants(validGrants), 'client 必须接受合法 grants')
+  for (const [label, value] of badGrants) {
+    assert.throws(() => clientParseGrants(value), undefined, `client 必须拒绝 grants：${label}`)
+  }
+  assert.throws(() => clientParseReq({ revoke: 1 }), undefined, 'client 必须拒绝非布尔 revoke')
+  console.log('PASS grants remote 描述符两端齐备、方法集一致、出入参均 fail-closed')
+}
+
 if (failed > 0) {
   console.error(`status: ${failed} 项失败`)
   process.exit(1)
