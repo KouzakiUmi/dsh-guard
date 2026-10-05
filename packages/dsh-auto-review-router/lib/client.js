@@ -67,6 +67,16 @@ window.__ModuleLoader__.load({
       budget: '预算',
       guidance: '修改指引',
       guidanceBody: '使用上方表单通过官方 Settings 保存，持久化由 ConfigEditor 负责。字段校验失败或配置过期时不会覆盖。',
+      grantsTitle: '已授权目录',
+      grantsBody: '人工放行过的中风险调用会按「目录 + 操作类别」记下来，之后不再重复询问。这只是不打扰，不会放宽任何权限；敏感路径与删除操作每次仍会询问。',
+      grantsUnavailable: '授权记忆不可用（未启用或读不到 profile），当前没有任何已授权目录。',
+      grantsEmpty: '当前没有已授权目录。',
+      grantsCreate: '新建文件',
+      grantsEdit: '文件编辑',
+      grantsRevoke: '撤销所有已授权目录',
+      grantsRevokeConfirm: '确认撤销',
+      grantsRevokeCancel: '取消',
+      grantsRevokeWarning: '撤销后，这些目录下的操作会重新逐次询问。已放行的调用不受影响。',
     }
     const en = {
       nav: 'Auto review router',
@@ -123,6 +133,16 @@ window.__ModuleLoader__.load({
       budget: 'Budget',
       guidance: 'How to change config',
       guidanceBody: 'Use the form above. Official Settings and ConfigEditor own persistence and revision checks. Refused or stale edits never overwrite current configuration.',
+      grantsTitle: 'Granted directories',
+      grantsBody: 'Manually approved medium-risk calls are remembered per directory and operation class so they stop asking. This only removes interruptions — it grants no extra permission. Sensitive paths and deletes still ask every time.',
+      grantsUnavailable: 'Grant memory is unavailable (not enabled, or profile unreadable). No directories are granted.',
+      grantsEmpty: 'No granted directories.',
+      grantsCreate: 'file creation',
+      grantsEdit: 'file edit',
+      grantsRevoke: 'Revoke all granted directories',
+      grantsRevokeConfirm: 'Confirm revoke',
+      grantsRevokeCancel: 'Cancel',
+      grantsRevokeWarning: 'After revoking, operations in those directories will ask again every time. Already-approved calls are unaffected.',
     }
 
     // 与 Host lib/index.js 的 parseRouterStatus 逻辑逐句一致；互反样例见 test/status.mjs。
@@ -280,13 +300,13 @@ window.__ModuleLoader__.load({
       if (values.reviewerEffort && !model.reasoning?.efforts.some(effort => effort.id === values.reviewerEffort)) return t('unavailableEffort')
       return ''
     }
-    function RouterPage({ call, settings, loadCatalog, t }) {
-      const lifetime = react.useRef({ active: true, status: 0, form: 0, catalog: 0 })
+    function RouterPage({ call, settings, loadCatalog, grants, t }) {
+      const lifetime = react.useRef({ active: true, status: 0, form: 0, catalog: 0, grants: 0 })
       react.useEffect(() => {
         lifetime.current.active = true
         return () => {
           lifetime.current.active = false
-          for (const key of ['status', 'form', 'catalog']) lifetime.current[key]++
+          for (const key of ['status', 'form', 'catalog', 'grants']) lifetime.current[key]++
         }
       }, [])
       const current = (key, generation) => lifetime.current.active && lifetime.current[key] === generation
@@ -305,6 +325,39 @@ window.__ModuleLoader__.load({
         } finally { if (current('status', generation)) setBusy(false) }
       }, [call])
       react.useEffect(() => { load(); return () => { lifetime.current.status++ } }, [load])
+
+      // 已授权目录：让用户看得见自己授予了什么，并能把它们全部收回。
+      // 没有这个入口，store.clear() 修得再对也是用户够不着的安全控制。
+      const [grantState, setGrantState] = react.useState({ value: null, status: 'idle', error: '' })
+      const loadGrants = react.useCallback(async () => {
+        if (!lifetime.current.active || typeof grants !== 'function') return
+        const generation = ++lifetime.current.grants
+        setGrantState({ value: null, status: 'loading', error: '' })
+        try {
+          const value = await grants(false)
+          if (current('grants', generation)) setGrantState({ value, status: 'ready', error: '' })
+        } catch (error) {
+          if (current('grants', generation)) setGrantState({ value: null, status: 'error', error: error?.message || String(error) })
+        }
+      }, [grants])
+      react.useEffect(() => { loadGrants(); return () => { lifetime.current.grants++ } }, [loadGrants])
+      const [confirmRevoke, setConfirmRevoke] = react.useState(false)
+      const [revokeError, setRevokeError] = react.useState('')
+      const revoke = react.useCallback(async () => {
+        if (!lifetime.current.active || typeof grants !== 'function') return
+        setRevokeError('')
+        const generation = ++lifetime.current.grants
+        try {
+          await grants(true)
+          if (!current('grants', generation)) return
+          setConfirmRevoke(false)
+          setGrantState({ value: { available: true, grants: [] }, status: 'ready', error: '' })
+          // 撤销是安全状态变化：设置页读数（若有）一并刷新
+          setStatus(null); load()
+        } catch (error) {
+          if (current('grants', generation)) setRevokeError(error?.message || String(error))
+        }
+      }, [grants, load])
 
       const [catalog, setCatalog] = react.useState({ value: null, status: 'idle', error: '' })
       const reloadCatalog = react.useCallback(async () => {
@@ -467,6 +520,35 @@ window.__ModuleLoader__.load({
           line('temperature', show(status.budget.temperature)),
           line('logDecisions', show(status.budget.logDecisions)),
         ) : null,
+        h('section', { style: cardStyle },
+          h('h3', { style: { margin: '0 0 6px', fontSize: 14 } }, t('grantsTitle')),
+          h('p', { style: { margin: '0 0 8px', opacity: 0.8 } }, t('grantsBody')),
+          grantState.status === 'error'
+            ? h('p', { role: 'alert', style: { color: '#dc2626' } }, grantState.error)
+            : null,
+          revokeError ? h('p', { role: 'alert', style: { color: '#dc2626' } }, revokeError) : null,
+          grantState.value?.available === false
+            ? h('p', { style: { opacity: 0.8 } }, t('grantsUnavailable'))
+            : null,
+          grantState.value?.available === true
+            ? h('ul', { style: { margin: '0 0 8px', paddingLeft: '1.2em' } },
+              (grantState.value.grants ?? []).length === 0
+                ? h('li', { style: { opacity: 0.8 } }, t('grantsEmpty'))
+                : grantState.value.grants.map((grant, index) => h('li', { key: `${index}` },
+                  `${safeText(grant.dir, 400)} · ${grant.opClass === 'create' ? t('grantsCreate') : t('grantsEdit')} · ${grant.useCount}`)))
+            : null,
+          confirmRevoke
+            ? h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+              h('button', { type: 'button', style: btnStyle, onClick: revoke }, t('grantsRevokeConfirm')),
+              h('button', { type: 'button', style: btnStyle, onClick: () => setConfirmRevoke(false) }, t('grantsRevokeCancel')),
+              h('span', { style: { opacity: 0.8 } }, t('grantsRevokeWarning')))
+            : h('button', {
+              type: 'button',
+              disabled: grantState.status === 'loading' || (grantState.value?.grants ?? []).length === 0,
+              style: btnStyle,
+              onClick: () => setConfirmRevoke(true),
+            }, t('grantsRevoke')),
+        ),
         h('section', { style: cardStyle },
           h('h3', { style: { margin: '0 0 6px', fontSize: 14 } }, t('guidance')),
           h('p', { style: { margin: 0 } }, t('guidanceBody')),
@@ -786,6 +868,26 @@ window.__ModuleLoader__.load({
       }
       const history = createHistoryStore(readHistory)
       ctx.effect(() => () => history.dispose(), 'dsh-auto-review-router: history sources')
+      /**
+       * 已授权目录：读列表 / 全部撤销。
+       * 撤销是用户拿回控制权的动作 —— 没有这个入口，store.clear() 修得再对也够不着。
+       */
+      const grants = async (revoke) => {
+        const deadline = Date.now() + 20000
+        await mounted
+        for (;;) {
+          if (disposed) throw new Error('Client 已卸载')
+          const service = ctx.get('remote.autoReviewRouter')
+          if (service !== undefined) {
+            if (typeof service.grants !== 'function') throw new Error('Host grants is unavailable')
+            const value = unwrap(await abortable(service.grants({ revoke }), signal), t)
+            if (disposed) throw new Error('Client disposed')
+            return value
+          }
+          if (Date.now() > deadline) throw new Error('remote.autoReviewRouter 挂载超时（20 秒）')
+          await abortable(new Promise(resolve => setTimeout(resolve, 250)), signal)
+        }
+      }
       const call = async (method) => {
         const deadline = Date.now() + 20000
         await mounted
@@ -815,7 +917,7 @@ window.__ModuleLoader__.load({
         order: 50,
         label: () => t('nav'),
         locale: NS,
-        inject: () => ({ call, settings: settingsIO, loadCatalog, t }),
+        inject: () => ({ call, settings: settingsIO, loadCatalog, grants, t }),
       }
       // ctx.slots.inject 是等待语义：槽未声明时回调不执行、不抛错（renderer Slots.inject 用
       // subscribeDeclaration 等待声明），因此 try/catch 回退永远不触发；诊断只能靠探针 + 日志。

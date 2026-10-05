@@ -42,6 +42,43 @@ const CONFLICT_WARN = '官方 dsh-experimental-auto-review 已注册 Auto，本�
  * @param {object} ctx
  * @param {object} [rawConfig]
  */
+/**
+ * 已授权目录的只读视图 + 撤销入口。
+ *
+ * 2026-10-05：授权记忆写了 clear()，但此前**没有任何调用方** —— 设置页与 RPC
+ * 都没接，用户根本没有拿回控制权的路径。安全控制存在却够不着，等于没有。
+ * 这里补上真实入口：读列表（让用户知道自己授予了什么）+ 全部撤销。
+ *
+ * 撤销不改变任何权限，只让后续调用重新询问。
+ */
+export function queryGrants(ctx, { revoke = false } = {}) {
+  const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
+  const store = live?.grants ?? null
+  if (store === null) {
+    return { available: false, reason: 'store-unavailable', grants: [], revoked: false }
+  }
+  if (revoke) {
+    let ok = false
+    try { ok = store.clear() === true } catch { ok = false }
+    if (!ok) return { available: true, reason: 'revoke-failed', grants: [], revoked: false }
+    return { available: true, reason: null, grants: [], revoked: true }
+  }
+  let grants = []
+  try { grants = store.list() } catch { grants = [] }
+  return {
+    available: true,
+    reason: null,
+    revoked: false,
+    grants: grants.map(grant => ({
+      dir: grant.dir,
+      opClass: grant.opClass,
+      tool: grant.tool,
+      at: grant.at,
+      useCount: grant.useCount,
+    })),
+  }
+}
+
 export function queryRouterStatus(ctx, rawConfig) {
   const live = ctx !== null && typeof ctx === 'object' ? runtimeByCtx.get(ctx) : undefined
   const config = live?.readConfig() ?? normalizeConfig(rawConfig ?? ctx?.config)
@@ -196,9 +233,13 @@ class RouterStatusRemote {
   history(request) {
     throw new Error('autoReviewRouter.history 未绑定')
   }
+  grants(request) {
+    throw new Error('autoReviewRouter.grants 未绑定')
+  }
 }
 markDirectRemote(RouterStatusRemote.prototype, 'read')
 markDirectRemote(RouterStatusRemote.prototype, 'history')
+markDirectRemote(RouterStatusRemote.prototype, 'grants')
 
 function exposeRouterRemote(ctx) {
   try {
@@ -214,6 +255,9 @@ function exposeRouterRemote(ctx) {
     }
     service.history = function history(request) {
       return queryApprovalHistory(ctx, request)
+    }
+    service.grants = function grants(request) {
+      return queryGrants(ctx, request ?? {})
     }
     if (typeof ctx.reflect?.provide === 'function') {
       ctx.reflect.provide('autoReviewRouter', service)

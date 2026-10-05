@@ -2,12 +2,12 @@
  * 离线自测。断言名与契约第 8.2 节一一对应，便于机械复核。
  */
 import { Buffer } from 'node:buffer'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { buildReviewContext } from '../lib/context.js'
 import './runtime.mjs'
-const { apply } = await import('../lib/index.js')
+const { apply, queryGrants } = await import('../lib/index.js')
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.js'
 
 // 授权记忆的可授权性判定要求目录链可信且非敏感根；os.tmpdir() 落在
@@ -539,6 +539,40 @@ await checkAsync('run_code 外层调用不被审查', async () => {
   assert(nextCalls === 1, '外层 run_code 应直接 next()')
   assert(result === downstream, '外层 run_code 应透传')
   assert(ctx.calls.stream === 0, '外层 run_code 不应调用 llm.stream')
+})
+
+// 授权记忆的撤销入口。2026-10-05：store.clear() 写了很久，但此前**没有任何调用方**
+// —— 设置页与 RPC 都没接，用户根本没有拿回控制权的路径。queryGrants 是
+// 设置页「撤销所有已授权目录」的 Host 侧实现，这里锁住它真的能用。
+await checkAsync('授权撤销入口可读可撤', async () => {
+  const dir = join(profileDir, 'revoke-target')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, 'a.txt')
+  writeFileSync(file, 'x')
+  // 直接建 store 写入一条授权，避开完整的审批往返。
+  const { createGrantStore, grantLedgerPath } = await import('../lib/grant-store.js')
+  const store = createGrantStore(grantLedgerPath(profileDir))
+  const written = store.remember(file, 'edit', { session: 's', tool: 'edit', approvalRequestId: 'r' })
+  assert(written.ok, `写入授权应成功（${JSON.stringify(written)}）`)
+
+  // 用同一 profile 目录建运行时，使 queryGrants 能拿到 store。
+  const ctx = fakeCtx({ policy: 'ask', stream() { return decisionStream('{"risk":"medium","decision":"deny","reason":"x"}') } })
+  ctx.profileContext = { dir: profileDir }
+  apply(ctx, { enabled: true, reviewerProvider: 'p', reviewerModel: 'm', timeoutMs: 20000 })
+
+  const listed = queryGrants(ctx)
+  assert(listed.available === true, '授权列表应可用')
+  assert(listed.revoked === false, '只读查询不得撤销')
+  assert(listed.grants.length >= 1, `应至少列出刚写入的授权（实际 ${listed.grants.length}）`)
+
+  const revoked = queryGrants(ctx, { revoke: true })
+  assert(revoked.revoked === true, '撤销必须成功')
+  assert(revoked.grants.length === 0, '撤销后不得残留')
+  assert(queryGrants(ctx).grants.length === 0, '撤销后列表为空')
+  // 撤销的权威判据是「跨重启不再命中」——单进程内的另一个实例可能还持有
+  // 旧缓存（同路径共享状态按 mtime/size 判定，粒度有限）。
+  const reopened = createGrantStore(grantLedgerPath(profileDir))
+  assert(reopened.check(file, 'edit').hit === false, '撤销后重启不得再命中（墓碑必须跨重启生效）')
 })
 
 if (failed > 0) {
