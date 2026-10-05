@@ -1,4 +1,4 @@
-# dsh-auto-review-router 0.3.0
+# dsh-auto-review-router 0.3.1
 
 可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。0.3.0 起增加官方人工审批继承及按会话隔离的持久审批历史；GUI 实机验收在发布安装后另行记录。
 

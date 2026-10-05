@@ -29,9 +29,11 @@ window.__ModuleLoader__.load({
       field_manualFallback: '高危拒绝转官方人工审批', field_manualApprovalTimeoutMs: '人工审批超时（毫秒）',
       manualNote: '高危审查拒绝可转交官方人工审批；默认 60 秒，超时由 Host 取消并拒绝。Never 策略不变，本页不提供人工放行按钮。',
       auditNote: '关闭 logDecisions 仅停止旧日志输出，不关闭持久审批历史。',
-      historyTitle: '审批历史', historyScope: '当前会话持久审批历史；结果提示仅在输入区下方展示，不是聊天或轨迹工具卡片徽章。',
+      historyTitle: '审批历史', historyScope: '当前会话持久审批历史；结果提示在对应轮次的消息流卡片展示，不是聊天或轨迹工具卡片徽章。',
       historyExecutionNote: '审查允许 ≠ 工具已执行；未收到执行报告时结果未知。', historyLoading: '正在读取审批历史…', historyFailed: '审批历史读取失败（保留已读记录）',
       historyEmpty: '当前会话没有审批记录。', historyNoSession: '请先选择会话。', historyBlank: '请先开始会话。', historyGap: '历史可能不完整或不可用，请检查审计健康状态。',
+      historyServiceUnavailable: '审批历史服务不可用（插件未启用或尚未产生审批记录），这不是账本读取失败。',
+      historyTurnCardMore: '条同类结果',
       historyRisk: '风险', historyRoute: '审查路由', historyLocation: '轮次 / 步骤 / 调用', historyUnknown: '未知', historyUnlinked: '未建立唯一调用关联', historyInspect: '在轨迹中查看调用', historyOlder: '加载更早记录', historyTimeout: '人工审批超时，已拒绝',
       historyPhase_reviewer: '自动审查', historyPhase_downstream: '权限审批', historyPhase_manual: '人工审批', 'historyPhase_reported-result': '工具执行报告',
       history_reviewer_allow: '审查允许（不代表执行）', history_reviewer_deny: '审查拒绝', history_reviewer_failure: '审查失败', history_reviewer_cancel: '审查取消',
@@ -82,9 +84,11 @@ window.__ModuleLoader__.load({
       field_manualFallback: 'Escalate high-risk denial to official approval', field_manualApprovalTimeoutMs: 'Manual approval timeout (ms)',
       manualNote: 'A high-risk denial can use official manual approval; default 60 seconds. Host cancels and rejects on timeout. Never policy is unchanged; this page has no allow button.',
       auditNote: 'Disabling logDecisions only stops legacy log output, not durable approval history.',
-      historyTitle: 'Approval history', historyScope: 'Durable history for this session. The reminder is below the composer, not a chat or trajectory tool-card badge.',
+      historyTitle: 'Approval history', historyScope: 'Durable history for this session. Result reminders appear as message-flow cards on their turn, not as chat or trajectory tool-card badges.',
       historyExecutionNote: 'Review allow ≠ tool execution; execution is unknown without a reported result.', historyLoading: 'Reading approval history…', historyFailed: 'Approval history read failed (retaining loaded records)',
       historyEmpty: 'No approval records for this session.', historyNoSession: 'Select a session first.', historyBlank: 'Start a conversation first.', historyGap: 'History may be incomplete or unavailable; check audit health.',
+      historyServiceUnavailable: 'Approval history service is unavailable (the plugin is disabled or nothing has been recorded yet); this is not a ledger read failure.',
+      historyTurnCardMore: 'more like this',
       historyRisk: 'Risk', historyRoute: 'Reviewer route', historyLocation: 'Turn / step / call', historyUnknown: 'Unknown', historyUnlinked: 'No verified unique call association', historyInspect: 'Inspect call in trajectory', historyOlder: 'Load earlier records', historyTimeout: 'Manual approval timed out; rejected',
       historyPhase_reviewer: 'Auto review', historyPhase_downstream: 'Permission approval', historyPhase_manual: 'Manual approval', 'historyPhase_reported-result': 'Reported tool result',
       history_reviewer_allow: 'Review allowed (not execution)', history_reviewer_deny: 'Review denied', history_reviewer_failure: 'Review failed', history_reviewer_cancel: 'Review cancelled',
@@ -580,7 +584,10 @@ window.__ModuleLoader__.load({
             if (older) pages++
             emit({ sessionId: key, status: 'ready', records, nextCursor: cursor ?? null, health, error: '' })
           } catch (error) {
-            if (current()) emit({ ...state, status: 'error', error: HISTORY_ERRORS.has(error?.code) ? error.code : 'history-unavailable' })
+            // Host 业务错误码（HISTORY_ERRORS，由 Host 结果携带）原样透传；RPC 挂载失败、
+            // 服务缺失、超时、解析失败等无 code 错误一律归类为 service-unavailable，
+            // 不得误标为账本读取失败（history-unavailable）。
+            if (current()) emit({ ...state, status: 'error', error: HISTORY_ERRORS.has(error?.code) ? error.code : 'service-unavailable' })
           } finally { if (current()) { controller = undefined; schedule() } }
         }
         const entry = {
@@ -642,7 +649,7 @@ window.__ModuleLoader__.load({
         h('p', null, t('historyExecutionNote')),
         state.sessionId === null ? h('p', { role: 'status' }, t(blank ? 'historyBlank' : 'historyNoSession')) : h('button', { type: 'button', style: btnStyle, disabled: loading || state.status === 'disposed', onClick: () => source.refresh() }, t('refresh')),
         loading ? h('p', { role: 'status' }, t('historyLoading')) : null,
-        state.error ? h('p', { role: 'alert' }, `${t('historyFailed')} · ${state.error}`) : null,
+        state.error ? h('p', { role: 'alert' }, state.error === 'service-unavailable' ? t('historyServiceUnavailable') : `${t('historyFailed')} · ${state.error}`) : null,
         historyHealth(state.health, t),
         state.status === 'ready' && !groups.length && state.health.ready && !state.health.gap && !state.health.missingProfile && !state.health.closing ? h('p', { role: 'status' }, t('historyEmpty')) : null,
         ...groups.map(group => h('article', { key: group.dispatchId, style: cardStyle },
@@ -664,16 +671,22 @@ window.__ModuleLoader__.load({
         state.nextCursor !== null ? h('button', { type: 'button', style: btnStyle, disabled: loading || state.status === 'disposed', onClick: () => source.older() }, t('historyOlder')) : null,
       )
     }
-    function HistoryDock(props) {
+    // conversation.chat.turnTail 卡片（官方消息流追加槽，与 deliverables/plan/schedule 卡并列，
+    // 渲染在每轮收尾 assistant 文本之后）。只在该轮存在值得关注的最终审批结果时出现：
+    // 人工拒绝/取消（含超时）、审查拒绝、权限拒绝。查询失败、服务不可用、读取中、无记录、
+    // 纯放行一律不渲染；错误与健康细节只在「审批历史」Tab 内展示。
+    const NOTEWORTHY = row => (row.phase === 'manual' && (row.outcome === 'rejected' || row.outcome === 'cancelled'))
+      || (row.phase === 'reviewer' && row.outcome === 'deny')
+      || (row.phase === 'downstream' && row.outcome === 'deny')
+    function ApprovalTurnCard(props) {
       const { state } = useHistory(props), t = props.t
-      if (state.sessionId === null || state.status === 'disposed') return null
-      if (state.error) return h('div', { role: 'alert' }, `${t('historyFailed')} · ${state.error}`)
-      if (state.health === null) return h('div', { role: 'status' }, t('historyLoading'))
-      // A read-only result reminder, not a pending-approval replacement or tool-card badge.
-      const latest = state.records.find(row => ['manual', 'reported-result', 'downstream', 'reviewer'].includes(row.phase))
+      if (state.sessionId === null || state.status === 'disposed' || state.error || state.health === null) return null
+      const rows = state.records.filter(row => row.turn === props.turn && NOTEWORTHY(row))
+      if (!rows.length) return null
+      const latest = rows[0] // store 内 records 按 ledgerSeq 降序
       return h('div', { role: 'status', style: { padding: '4px 8px', overflowWrap: 'anywhere' } },
-        latest ? `${safeText(latest.toolName, 160)} · ${t('historyPhase_' + latest.phase)}: ${outcomeText(latest, t)} · ${t('historyExecutionNote')}` : t(state.health.ready && !state.health.gap && !state.health.missingProfile && !state.health.closing ? 'historyEmpty' : 'historyGap'),
-        historyHealth(state.health, t),
+        `${safeText(latest.toolName, 160)} · ${t('historyPhase_' + latest.phase)}: ${outcomeText(latest, t)} · ${t('historyExecutionNote')}`,
+        rows.length > 1 ? ` · +${rows.length - 1} ${t('historyTurnCardMore')}` : null,
       )
     }
 
@@ -788,10 +801,12 @@ window.__ModuleLoader__.load({
         name: 'conversation.view', id: 'dsh-guard.approval-history', order: 20,
         label: () => t('historyTitle'), locale: NS, inject: () => ({ history, t }),
       }, HistoryView))
-      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-        name: 'conversation.composer.dock', id: 'dsh-guard.approval-result', order: 30,
+      // 消息流追加槽（官方 list 槽，replaceRisk none）：审批结果只作为卡片出现在对应轮次
+      // 收尾文本之后；输入框上方（composer.dock）不再注册任何内容。
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail', id: 'dsh-guard.approval-result', order: 20,
         locale: NS, inject: () => ({ history, t }),
-      }, HistoryDock))
+      }, ApprovalTurnCard))
     }
 
     exports.statusRemote = statusRemote
@@ -801,7 +816,7 @@ window.__ModuleLoader__.load({
     exports.createHistoryStore = createHistoryStore
     exports.groupHistory = groupHistory
     exports.HistoryView = HistoryView
-    exports.HistoryDock = HistoryDock
+    exports.ApprovalTurnCard = ApprovalTurnCard
     exports.dictionaries = { zh, en }
     exports.validateDraft = validateDraft
     exports.createSettingsIO = createSettingsIO

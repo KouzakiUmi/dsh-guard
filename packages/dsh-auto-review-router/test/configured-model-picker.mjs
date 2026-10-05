@@ -298,10 +298,10 @@ console.log('PASS asynchronous generations: stale refresh success/error, depende
     locale: { register() { return () => {} }, bind() { return key => ui.dictionaries.en[key] || key } },
     get(name) { if (name === 'remote.session') return service; if (name === 'remote.settings') return settings; throw new Error(`Unexpected service: ${name}`) },
     effect(fn) { const value = fn(); effects.push(value); return value },
-    slots: { spec() { return {} }, inject(slot, fn) { assert.ok(['settings.plugins.tab', 'conversation.view', 'conversation.composer.dock'].includes(slot)); const dispose = fn(); effects.push(dispose) }, register(entry) { entries.push(entry); return () => entries.pop() } },
+    slots: { spec() { return {} }, inject(slot, fn) { assert.ok(['settings.plugins.tab', 'conversation.view', 'conversation.chat.turnTail'].includes(slot)); const dispose = fn(); effects.push(dispose) }, register(entry) { entries.push(entry); return () => entries.pop() } },
   }
   ui.apply(ctx)
-  assert.deepEqual(entries.map(row => row.name), ['settings.plugins.tab', 'conversation.view', 'conversation.composer.dock'])
+  assert.deepEqual(entries.map(row => row.name), ['settings.plugins.tab', 'conversation.view', 'conversation.chat.turnTail'])
   assert.equal(entries.filter(row => row.name === 'settings.plugins.tab').length, 1)
   const props = entries[0].inject()
   assert.equal(typeof props.loadCatalog, 'function')

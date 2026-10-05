@@ -116,9 +116,9 @@ function renderer(language = 'zh') {
   const client = factory(react), t = key => client.dictionaries[language][key] || key
   const walk = node => typeof node === 'object' && node ? [node, ...node.children.flatMap(walk)] : []
   const text = node => typeof node === 'object' && node ? node.children.map(text).join(' ') : String(node)
-  function render(state, session = { blank: false }, sessionId = 'A', component = 'HistoryView') {
+  function render(state, session = { blank: false }, sessionId = 'A', component = 'HistoryView', extra = {}) {
     const history = { source(id) { return { subscribe() {}, getSnapshot: () => id ? state : { sessionId: null, status: 'sessionless', records: [], nextCursor: null, health: null, error: '' }, refresh() {}, older() {} } } }
-    const tree = client[component]({ sessionId, useSession: fn => fn(session), history, t, inspectCall() { throw new Error('DTO has no global uniqueness proof') } })
+    const tree = client[component]({ sessionId, useSession: fn => fn(session), history, t, inspectCall() { throw new Error('DTO has no global uniqueness proof') }, ...extra })
     return { tree, nodes: walk(tree), text: text(tree), subscribed }
   }
   return { client, render }
@@ -141,11 +141,56 @@ for (const language of ['zh', 'en']) {
   const error = r.render({ ...state, status: 'error', records: [], health: null, error: 'history-unavailable' }); assert.equal(error.text.includes(r.client.dictionaries[language].historyEmpty), false)
   assert.ok(r.render({ ...state, records: [], nextCursor: null }).text.includes(r.client.dictionaries[language].historyEmpty))
   const gap = r.render({ ...state, records: [], nextCursor: null, health: health({ gap: true, corruptRecords: 1 }) }); assert.ok(gap.text.includes(r.client.dictionaries[language].historyGap)); assert.equal(gap.text.includes(r.client.dictionaries[language].historyEmpty), false)
-  assert.ok(r.render(state, { blank: false }, 'A', 'HistoryDock').text.includes(r.client.dictionaries[language].historyTimeout))
-  assert.ok(r.render({ ...state, records: [record(1)] }, { blank: false }, 'A', 'HistoryDock').text.includes(r.client.dictionaries[language].historyExecutionNote))
-  assert.equal(r.render(state, { blank: true }, 'A', 'HistoryDock').tree, null)
+  assert.ok(r.render(state, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 1 }).text.includes(r.client.dictionaries[language].historyTimeout))
+  assert.equal(r.render({ ...state, records: [record(1)] }, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 1 }).tree, null, '纯 allow 不渲染')
+  assert.equal(r.render(state, { blank: false }, 'A', 'ApprovalTurnCard', { turn: 2 }).tree, null, '其它轮次不渲染')
+  assert.equal(r.render(state, { blank: true }, 'A', 'ApprovalTurnCard', { turn: 1 }).tree, null)
 }
-console.log('PASS actual history/dock: safe text, dispatch stages/manual timeout, unknown execution, no-session/blank/loading/error/empty/gap')
+console.log('PASS actual history/turnTail card: safe text, dispatch stages/manual timeout, unknown execution, no-session/blank/loading/error/empty/gap')
+
+// turnTail 卡片收敛：错误/不可用/读取中/无记录/纯放行不渲染；拒绝与超时按轮次归属渲染。
+{
+  const r = renderer('zh'), zh = r.client.dictionaries.zh
+  const card = (records, patch = {}, turn = 1) => r.render({ sessionId: 'A', status: 'ready', records, nextCursor: null, health: health(), error: '', ...patch }, { blank: false }, 'A', 'ApprovalTurnCard', { turn })
+  assert.equal(card([]).tree, null, '无记录不渲染')
+  assert.equal(card([], { error: 'service-unavailable' }).tree, null, 'RPC 服务不可用不渲染')
+  assert.equal(card([], { error: 'history-unavailable' }).tree, null, '账本读取失败不渲染')
+  assert.equal(card([], { health: null, status: 'loading' }).tree, null, '读取中不渲染')
+  assert.equal(card([record(1), record(2, { phase: 'reported-result', outcome: 'reported-ok' })]).tree, null, 'allow+reported-ok 不常驻打扰')
+  assert.ok(card([record(3, { phase: 'reviewer', outcome: 'deny' })]).text.includes(zh.history_reviewer_deny))
+  assert.ok(card([record(4, { phase: 'downstream', outcome: 'deny' })]).text.includes(zh.history_downstream_deny))
+  assert.ok(card([record(5, { phase: 'manual', outcome: 'rejected' })]).text.includes(zh.history_manual_rejected))
+  const timeout = card([record(6, { phase: 'manual', outcome: 'cancelled', cause: 'timeout' })])
+  assert.ok(timeout.text.includes(zh.historyTimeout)); assert.ok(timeout.text.includes(zh.historyExecutionNote))
+  assert.ok(card([record(7, { phase: 'reviewer', outcome: 'deny', turn: 2 })], {}, 2).text.includes(zh.history_reviewer_deny), '按轮次归属渲染')
+  assert.equal(card([record(8, { phase: 'reviewer', outcome: 'deny', turn: null })]).tree, null, '无轮次归属不渲染')
+}
+console.log('PASS turnTail card gates: no error/loading/empty/allow-only rendering; deny/timeout render per turn')
+
+// Tab 错误文案区分：服务不可用（RPC/挂载类）不得误标为账本读取失败。
+{
+  const r = renderer('zh'), zh = r.client.dictionaries.zh
+  const tab = (error) => r.render({ sessionId: 'A', status: 'error', records: [], nextCursor: null, health: null, error })
+  const unavailable = tab('service-unavailable')
+  assert.ok(unavailable.text.includes(zh.historyServiceUnavailable), '服务不可用文案')
+  assert.equal(unavailable.text.includes(zh.historyFailed), false, '服务不可用不得误标为读取失败')
+  const failed = tab('history-unavailable')
+  assert.ok(failed.text.includes(zh.historyFailed) && failed.text.includes('history-unavailable'), '账本读取失败保留原文案与错误码')
+}
+// Store 错误归类：Host 业务码透传；无 code 的 RPC/挂载/超时失败一律 service-unavailable。
+{
+  for (const [code, thrown] of [
+    ['service-unavailable', new Error('Host history mount timed out')],
+    ['history-unavailable', Object.assign(new Error('ledger'), { code: 'history-unavailable' })],
+    ['session-unavailable', Object.assign(new Error('sess'), { code: 'session-unavailable' })],
+  ]) {
+    const store = ui.createHistoryStore(async () => { throw thrown }, timers())
+    const a = store.source('A'); const stop = a.subscribe(() => {}); await flush()
+    assert.equal(a.getSnapshot().status, 'error'); assert.equal(a.getSnapshot().error, code, `错误归类 ${code}`)
+    stop(); store.dispose()
+  }
+}
+console.log('PASS Tab copy distinguishes service-unavailable from ledger failure; store error classification')
 
 // Actual plugin mount and registered injection share a live RPC source. No fabricated empty success.
 {
@@ -160,10 +205,10 @@ console.log('PASS actual history/dock: safe text, dispatch stages/manual timeout
     slots: { spec() { return undefined }, inject(slot, fn) { const off = fn(); effects.push(off) }, register(options, component) { const row = { options, component }; registrations.push(row); return () => registrations.splice(registrations.indexOf(row), 1) } },
   }
   client.apply(ctx)
-  assert.deepEqual(registrations.map(row => row.options.name), ['settings.plugins.tab', 'conversation.view', 'conversation.composer.dock'])
+  assert.deepEqual(registrations.map(row => row.options.name), ['settings.plugins.tab', 'conversation.view', 'conversation.chat.turnTail'])
   assert.equal(registrations.filter(row => row.options.name === 'settings.plugins.tab').length, 1)
-  const tab = registrations[1].options.inject(), dock = registrations[2].options.inject()
-  assert.equal(tab.history, dock.history); assert.equal(requests.length, 0)
+  const tab = registrations[1].options.inject(), turnCard = registrations[2].options.inject()
+  assert.equal(tab.history, turnCard.history); assert.equal(requests.length, 0)
   const history = tab.history.source('A'), offTab = history.subscribe(() => {}), offDock = history.subscribe(() => {}); await flush()
   assert.equal(requests.length, 1); assert.deepEqual(requests[0], { sessionId: 'A', limit: 50 })
   assert.equal(history.getSnapshot().records.length, 1)

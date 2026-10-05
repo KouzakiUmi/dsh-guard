@@ -500,8 +500,11 @@ window.__ModuleLoader__.load({
       const running = props.useSession((s) => s.running) || false
       return h(ChangedFilesPage, { key: props.sessionId || 'no-session', sessionId: props.sessionId, call: props.call, running })
     }
-    function ChangedFilesSummary({ sessionId, useSession, call }) {
+    // conversation.chat.turnTail 卡片（官方消息流追加槽，渲染在每轮收尾 assistant 文本之后）。
+    // 会话级摘要只在最新收尾轮的单元格渲染，避免每个历史轮次重复出现；触发条件不变。
+    function ChangedFilesSummary({ sessionId, useSession, useChat, call, turn }) {
       const running = useSession((s) => s.running) || false
+      const latestTurn = typeof useChat === 'function' ? useChat((snapshot) => snapshot.timeline.turnOrder.at(-1)) : undefined
       const [value, setValue] = react.useState(null)
       const [error, setError] = react.useState('')
       react.useEffect(() => {
@@ -513,7 +516,9 @@ window.__ModuleLoader__.load({
         return () => { alive = false }
       }, [sessionId, running, call])
       if (!sessionId || running) return null
-      if (error) return h('small', { role: 'status' }, '已修改文件摘要读取失败：' + error)
+      if (turn !== undefined && latestTurn !== undefined && turn !== latestTurn) return null
+      // 与审批结果卡一致：读取失败不在消息流提示区渲染错误；失败细节由「已修改文件」Tab 的错误态承担。
+      if (error) return null
       if (!value || value.sessionId !== sessionId || !value.total) return null
       return h('small', { role: 'status' }, '已修改文件：' + value.total + ' 个捕获/目标路径。请打开「已修改文件」页签查看差异与单文件恢复；shell 等改动未覆盖。')
     }
@@ -603,8 +608,9 @@ window.__ModuleLoader__.load({
         name: 'conversation.view', id: 'dsh-guard.changed-files', order: 120, label: '已修改文件',
         inject: () => ({ call }),
       }, ChangedFilesView))
-      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-        name: 'conversation.composer.dock', id: 'dsh-guard.changed-files-summary', order: 120,
+      // 输入框上方（composer.dock）不再注册任何内容；摘要迁移到官方消息流追加槽。
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail', id: 'dsh-guard.changed-files-summary', order: 120,
         inject: () => ({ call }),
       }, ChangedFilesSummary))
     }

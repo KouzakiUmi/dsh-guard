@@ -85,7 +85,19 @@ running = true; render(); await settle(); render(); assert.equal(button('刷新�
 console.log('PASS stale prior-session confirm / running transition never writes')
 reset(); sessionId = undefined; cursor = 0; tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, call }); while (effects.length) effects.shift()(); await settle(); assert.equal(tree, null)
 reset(); sessionId = 'summary'; cursor = 0; tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, call }); while (effects.length) effects.shift()(); await settle(); cursor = 0; tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, call }); assert.match(text(), /已修改文件：26/); assert.equal(nodes((n) => n.type === 'button').length, 0)
-reset()
+// turnTail 迁移：会话级摘要只在最新收尾轮渲染；无 turn/useChat（旧调用形状）保持原行为。
+reset(); sessionId = 'summary'; cursor = 0
+const chatOf = (latest) => (selector) => selector({ timeline: { turnOrder: [1, 2, latest] } })
+tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, useChat: chatOf(3), turn: 2, call }); while (effects.length) effects.shift()(); await settle()
+assert.equal(tree, null, '非最新轮次的单元格不渲染会话级摘要')
+tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, useChat: chatOf(3), turn: 3, call }); while (effects.length) effects.shift()(); await settle()
+cursor = 0; tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, useChat: chatOf(3), turn: 3, call }); assert.match(text(), /已修改文件：26/, '最新轮次渲染摘要')
+reset(); sessionId = 'summary'; failure = 'RPC down'; cursor = 0
+tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, call }); while (effects.length) effects.shift()(); await settle()
+cursor = 0; tree = client.ChangedFilesSummary({ sessionId, useSession: () => false, call })
+assert.equal(tree, null, '读取失败时摘要卡不渲染（错误细节由「已修改文件」Tab 错误态承担）')
+assert.equal(text().includes('摘要读取失败'), false)
+failure = null; reset()
 console.log('PASS completion summary scoped and readonly')
 const registrations = [], effects2 = []
 const ctx = {
@@ -96,7 +108,7 @@ const ctx = {
 }
 client.apply(ctx)
 assert.deepEqual(registrations.map(({ options }) => [options.name, options.id]), [
-  ['settings.plugins.tab', 'audit-rollback-tab'], ['conversation.view', 'dsh-guard.changed-files'], ['conversation.composer.dock', 'dsh-guard.changed-files-summary'],
+  ['settings.plugins.tab', 'audit-rollback-tab'], ['conversation.view', 'dsh-guard.changed-files'], ['conversation.chat.turnTail', 'dsh-guard.changed-files-summary'],
 ])
 for (const value of effects2.reverse()) { const fn = await value; if (typeof fn === 'function') fn() }
 console.log('PASS fresh legal session Tab/dock IDs / unchanged single settings entry / descriptor equality')
