@@ -3,6 +3,7 @@
  */
 import { Buffer } from 'node:buffer'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { buildReviewContext } from '../lib/context.js'
@@ -10,12 +11,14 @@ import './runtime.mjs'
 const { apply, queryGrants } = await import('../lib/index.js')
 import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.js'
 
-// 授权记忆的可授权性判定要求目录链可信且非敏感根；os.tmpdir() 落在
-// %LOCALAPPDATA% 下会被判为 AppData 敏感段，因此测试目录放在 D 盘根下。
-const root = mkdtempSync('D:\\dsh-selftest-')
-// 授权记忆改为本次运行内有效（纯内存）后不再需要 profileContext 才能工作；
-// 这里保留一个临时目录供需要 profile 的用例使用。
-const profileDir = mkdtempSync('D:\\dsh-selftest-profile-')
+// 授权记忆的可授权性判定要求目录链可信且非敏感根。
+// Windows 上 os.tmpdir() 落在 %LOCALAPPDATA%\Temp，而 AppData 是敏感段，
+// fixture 会被判成过宽根 —— 所以那里用 D 盘根。其它平台用系统临时目录：
+// 硬编码 D:\ 在 Linux 上不是绝对路径，会让所有路径判定提前失败（CI 曾因此变红）。
+const tmpBase = process.platform === 'win32' ? 'D:\\' : tmpdir()
+const root = mkdtempSync(join(tmpBase, 'dsh-selftest-'))
+// 保留一个临时目录供需要 profile 的用例使用（授权记忆本身已不需要它）。
+const profileDir = mkdtempSync(join(tmpBase, 'dsh-selftest-profile-'))
 // 任何退出路径（含未捕获异常）都要清理，否则失败一次就在 D 盘根留两个目录。
 process.on('exit', () => {
   for (const p of [root, profileDir]) {

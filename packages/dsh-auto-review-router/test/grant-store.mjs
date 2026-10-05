@@ -6,14 +6,17 @@
 import './runtime.mjs'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, rmSync, linkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createGrantStore, targetPathOf, operationClassOf,
   isProtectedTarget, isTooBroadRoot, verifyAncestors, isInside, canonicalPathKey } from '../lib/grant-store.js'
 
-// 不用 os.tmpdir()：它落在 %LOCALAPPDATA%\Temp 下，而 AppData 是授权记忆的
-// 敏感段（MEDIUM-1 修复），会把 fixture 判成过宽根。改用 D 盘根下的
-// 一次性目录，语义上等价于「普通项目目录」。
-const root = mkdtempSync('D:\\dsh-grant-test-')
+// Windows 上 os.tmpdir() 落在 %LOCALAPPDATA%\Temp，而 AppData 是授权记忆的
+// 敏感段（会把 fixture 判成过宽根）—— 那里用 D 盘根下的一次性目录，
+// 语义上等价于「普通项目目录」。其它平台直接用系统临时目录：
+// 硬编码 D:\ 在 Linux 上不是绝对路径，所有路径判定会提前失败（CI 曾因此变红）。
+const isWin = process.platform === 'win32'
+const root = mkdtempSync(join(isWin ? 'D:\\' : tmpdir(), 'dsh-grant-test-'))
 const evidence = { tool: 'edit', approvalRequestId: 'r' }
 // 内存 store：每次调用建一个独立实例；作用域是本次运行，无落盘。
 const store = () => createGrantStore()
@@ -170,18 +173,36 @@ try {
   }
 
   // ── MEDIUM-1 R8：敏感子树不可授权，但普通项目目录不受连坐 ──────────
+  // 段名判定与平台无关（无论盘符语义如何，段里含 AppData 就是过宽）；
+  // 带盘符/绝对根形态的断言只在对应平台有意义，分开写以免互相掩盖。
   {
-    assert.equal(isTooBroadRoot('c:\\'), true)
-    assert.equal(isTooBroadRoot('c:\\users'), true)
-    assert.equal(isTooBroadRoot('c:\\users\\fractal'), true, 'profile 根过宽')
-    assert.equal(isTooBroadRoot('c:\\users\\fractal\\.dsh'), true, '~/.dsh 不可授权')
-    assert.equal(isTooBroadRoot('c:\\users\\fractal\\appdata\\local\\temp'), true, 'AppData 不可授权')
-    assert.equal(isTooBroadRoot('c:\\program files\\dsh next\\resources\\app'), true, 'DSH 安装目录不可授权')
-    assert.equal(isTooBroadRoot('d:\\dsh-guard'), false, '项目根不应被连坐（复核实测此处过宽）')
-    assert.equal(isTooBroadRoot('d:\\dsh-guard\\packages'), false, '项目子目录可授权')
-    const s = store('r8')
-    assert.equal(s.remember('C:\\Users\\Fractal\\.dsh\\settings.json', 'create', evidence).ok, false)
-    ok('MEDIUM-1 R8：敏感子树拒、普通项目目录不连坐')
+    if (isWin) {
+      assert.equal(isTooBroadRoot('c:\\'), true, '盘根过宽')
+      assert.equal(isTooBroadRoot('c:\\users'), true)
+      assert.equal(isTooBroadRoot('c:\\users\\fractal'), true, 'win32 profile 根过宽')
+      assert.equal(isTooBroadRoot('c:\\users\\fractal\\.dsh'), true, '~/.dsh 不可授权')
+      assert.equal(isTooBroadRoot('c:\\users\\fractal\\appdata\\local\\temp'), true, 'AppData 不可授权')
+      assert.equal(isTooBroadRoot('c:\\program files\\dsh next\\resources\\app'), true, 'DSH 安装目录不可授权')
+      assert.equal(isTooBroadRoot('d:\\dsh-guard'), false, '项目根不应被连坐（复核实测此处过宽）')
+      assert.equal(isTooBroadRoot('d:\\dsh-guard\\packages'), false, '项目子目录可授权')
+      const s = store('r8')
+      assert.equal(s.remember('C:\\Users\\Fractal\\.dsh\\settings.json', 'create', evidence).ok, false,
+        'profile 下的 .dsh 不可授权')
+    } else {
+      assert.equal(isTooBroadRoot('/'), true, '文件系统根过宽')
+      assert.equal(isTooBroadRoot('/home'), true)
+      assert.equal(isTooBroadRoot('/home/user'), true, 'POSIX 家目录根过宽')
+      assert.equal(isTooBroadRoot('/root'), true, '/root 过宽')
+      assert.equal(isTooBroadRoot('/home/user/.dsh'), true, '~/.dsh 不可授权')
+      assert.equal(isTooBroadRoot('/home/user/.config/app'), true, '.config 不可授权')
+      const s = store('r8')
+      assert.equal(s.remember('/home/user/.ssh/id_rsa', 'edit', evidence).ok, false, '凭据路径不可授权')
+      // 反向：普通项目根不受连坐
+      assert.equal(isTooBroadRoot('/srv/project'), false, '项目根不应被连坐')
+      assert.equal(isTooBroadRoot('/srv/project/app'), false, '项目子目录可授权')
+      assert.equal(isTooBroadRoot('/srv/project/root'), false, '中间段叫 root 不应误伤')
+    }
+    ok(`MEDIUM-1 R8：敏感子树拒、普通项目目录不连坐（${process.platform}）`)
   }
 
   // ── 证据不全不记 ────────────────────────────────────────────────
@@ -303,12 +324,20 @@ try {
     ok('N3 敏感段与系统目录覆盖完整')
   }
 
-  // ── N10：isInside 大小写归一 ────────────────────────────────────
+  // ── N10：isInside 的目录归属判定 ────────────────────────────────
   {
-    assert.equal(isInside('D:\\PROJ\\x', 'd:\\proj'), true, '大小写不同仍应判定为在内')
-    assert.equal(isInside('d:\\proj', 'D:\\PROJ'), true)
-    assert.equal(isInside('d:\\proj2\\x', 'd:\\proj'), false, '前缀相同但不同目录不得误判')
-    ok('N10 isInside 大小写归一')
+    if (isWin) {
+      // 大小写归一只有 win32 才有（canonicalPathKey 在 POSIX 上原样返回）。
+      assert.equal(isInside('D:\\PROJ\\x', 'd:\\proj'), true, '大小写不同仍应判定为在内')
+      assert.equal(isInside('d:\\proj', 'D:\\PROJ'), true)
+    } else {
+      assert.equal(isInside('/proj/x', '/proj'), true, 'POSIX：子路径必须判定为在内')
+      assert.equal(isInside('/proj', '/proj'), true, '自身算在内')
+      assert.equal(isInside('/PROJ/x', '/proj'), false, 'POSIX 区分大小写')
+    }
+    // 这两条与平台无关：前缀相似但不是子目录必须判否。
+    assert.equal(isInside(join(root, 'proj2', 'x'), join(root, 'proj')), false, '前缀相同但不同目录不得误判')
+    ok(`N10 isInside 目录归属判定（${process.platform}）`)
   }
 
   // ── 第三轮 MEDIUM-3：单段也必须查敏感表 ─────────────────────────

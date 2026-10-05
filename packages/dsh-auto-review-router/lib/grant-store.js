@@ -217,8 +217,14 @@ function isTooBroadRoot(dirKey) {
   for (const sensitive of SENSITIVE_SEGMENTS) {
     if (lower.includes(sensitive)) return true
   }
-  // C:\Users\<name> 是用户 profile 根：授权它等于授权整个用户目录。
-  if (lower[0] === 'users' && lower.length >= 2) return true
+  // 用户 profile 根：授权它等于授权整个用户目录。三种平台形态都要认。
+  // 2026-10-05：此前只判 win32 的 `C:\Users\<name>`，POSIX 的 `/home/<user>`
+  // 与 `/root` 完全漏判 —— 在 Linux 上把家目录整棵授权出去是允许的。
+  // 只按**首段**判定，避免误伤路径中间出现的同名目录（如 /proj/root）。
+  // 只封到「用户根」这一层：`/home/<user>/projects/app` 这种项目目录仍可授权。
+  if (lower[0] === 'users' && lower.length <= 2) return true      // C:\Users、C:\Users\<name>
+  if (lower[0] === 'home' && lower.length <= 2) return true       // /home、/home/<user>
+  if (lower[0] === 'root' && lower.length === 1) return true      // /root
   return false
 }
 
