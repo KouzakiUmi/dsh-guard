@@ -332,6 +332,9 @@ export function createGrantStore(filePath, options = {}) {
   let writable = true
   // 撤销墓碑时间戳：所有 at <= 该值的授权行都视为已撤销（N2）。
   let clearedAt = 0
+  // 存活授权里最大的 at。撤销墓碑必须严格大于它（NEW-1），
+  // 否则时钟回拨时写出的墓碑会比已有授权还早，撤销静默失效。
+  let maxLiveAt = 0
 
   const grantKey = (grant) => `${grant.dir} ${grant.opClass}`
 
@@ -399,6 +402,13 @@ export function createGrantStore(filePath, options = {}) {
     const live = [...byKey.values()].filter(grant => grant.at > clearedAt)
     const capped = live.length > maxGrants ? live.slice(live.length - maxGrants) : live
     grants = capped
+    // NEW-1（第四轮复核实证，HIGH）：记录存活授权里最大的 at。
+    // 撤销墓碑必须严格大于它，否则时钟回拨后写出的墓碑会比已有授权还早，
+    // load() 的 `at > clearedAt` 滤不掉那些授权 —— 撤销静默失效、授权跨重启复活。
+    // 触发条件正是时钟回拨本身（NTP 阶跃、虚拟机快照恢复、手改日期）。
+    let newestAt = 0
+    for (const grant of capped) if (grant.at > newestAt) newestAt = grant.at
+    maxLiveAt = newestAt
     shared.grants = capped
     shared.clearedAt = clearedAt
     shared.lines = lineCount
@@ -539,9 +549,8 @@ export function createGrantStore(filePath, options = {}) {
     }
     // 2026-10-05 第三轮复核实证（MEDIUM-5）：系统时钟回拨（NTP 阶跃、虚拟机快照
     // 恢复、手改日期）会让新的 at 落到旧墓碑之前，重启后被 `at <= clearedAt` 全部滤掉 ——
-    // 静默、永久，直到时钟追上来。这里钳制 at 严格大于 clearedAt，
-    // 让「刚重新授权」永远不会被同一进程自己写的墓碑压死。
-    const at = Math.max(Date.now(), clearedAt + 1)
+    // 静默、永久，直到时钟追上来。这里钳制 at 严格大于 clearedAt 与已有的最大 at。
+    const at = Math.max(Date.now(), clearedAt + 1, maxLiveAt + 1)
     const grant = { v: 1, dir: dirKey, opClass, tool, session, approvalRequestId, at, useCount: 0 }
     // 先并入内存缓存，再决定是否落盘。
     // 2026-10-05 第三轮复核实证（HIGH-2）：原顺序是 append → compact → push，
@@ -559,6 +568,7 @@ export function createGrantStore(filePath, options = {}) {
       return { ok: false, reason: 'write-failed' }
     }
     markWritten()
+    if (at > maxLiveAt) maxLiveAt = at
     if (linesWritten >= maxLedgerLines) compact()
     return { ok: true, reason: 'stored' }
   }
@@ -647,8 +657,12 @@ export function createGrantStore(filePath, options = {}) {
      */
     clear() {
       refresh()
-      // 墓碑必须严格大于已见到的任何墓碑，否则时钟回拨时会写出无效墓碑。
-      const epoch = Math.max(Date.now(), clearedAt + 1)
+      // 墓碑必须严格大于：已见墓碑、**所有存活授权的 at**、当前时钟。
+      // 只比较前两者时，本进程首次撤销（clearedAt=0）会退化成裸 Date.now()，
+      // 而 load() 的 `at > clearedAt` 滤不掉比墓碑老的授权 ——
+      // 时钟回拨场景下「撤销所有已授权目录」会返回 true 却什么都没撤销。
+      // 这是第二轮 N2（撤销复活）的再犯，第四轮复验实测 1 秒/1 小时/1 天偏移均复现。
+      const epoch = Math.max(Date.now(), clearedAt + 1, maxLiveAt + 1)
       try {
         mkdirSync(dirname(filePath), { recursive: true })
         appendFileSync(filePath, `${JSON.stringify({ v: 1, epoch })}\n`, 'utf8')

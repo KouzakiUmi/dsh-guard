@@ -601,6 +601,59 @@ try {
     ok('端到端：询问 → 放行 → 免问 → 敏感仍问 → 重启 → 撤销')
   }
 
+  // ── 第四轮 NEW-1 [HIGH]：时钟回拨后 clear() 静默失效 ────────────
+  // 此前只测了「先回拨 → 再 remember」这一个顺序（MEDIUM-5），
+  // 于是漏掉了「先授权 → 再回拨 → 再 clear」——墓碑比已有授权还早，
+  // load() 的 `at > clearedAt` 滤不掉，撤销返回 true 却什么都没撤销。
+  // 这是第二轮 N2（撤销复活）的再犯。
+  {
+    for (const [label, offset] of [['1 秒', 1000], ['1 小时', 3600_000], ['1 天', 86400_000]]) {
+      const name = `new1-${label.replace(/\s/g, '')}`
+      const profile = join(root, name)
+      const d = dir(name)
+      const p = file(join(d, 'a.txt'))
+      const s = createGrantStore(grantLedgerPath(profile))
+      assert.equal(s.remember(p, 'edit', evidence).ok, true, `${label}：前置授权应写入`)
+      const realNow = Date.now
+      const base = realNow()
+      Date.now = () => base - offset
+      let cleared
+      let afterRestart
+      try {
+        cleared = s.clear()
+        afterRestart = createGrantStore(grantLedgerPath(profile)).check(p, 'edit')
+      } finally { Date.now = realNow }
+      assert.equal(cleared, true, `${label}：clear 应返回成功`)
+      assert.equal(afterRestart.hit, false,
+        `${label} 回拨后撤销必须跨重启生效（实际 ${JSON.stringify(afterRestart)}）`)
+    }
+    ok('第四轮 NEW-1 [HIGH] 时钟回拨后 clear() 不再静默失效')
+  }
+
+  // 第四轮复核要求换一个未测过的顺序：clear / 回拨 / remember 多轮交替。
+  // 每一轮都必须保持「刚授权的能命中、撤销后立刻不命中」。
+  {
+    const name = 'new1-alternating'
+    const profile = join(root, name)
+    const d = dir(name)
+    const p = file(join(d, 'a.txt'))
+    const realNow = Date.now
+    const base = realNow()
+    try {
+      for (let round = 1; round <= 6; round += 1) {
+        // 时钟在每轮之间回拨，且回拨量递增
+        Date.now = () => base - round * 60_000
+        const s = createGrantStore(grantLedgerPath(profile))
+        assert.equal(s.remember(p, 'edit', evidence).ok, true, `第 ${round} 轮：授权应写入`)
+        assert.equal(s.check(p, 'edit').hit, true, `第 ${round} 轮：刚授权必须命中`)
+        assert.equal(s.clear(), true, `第 ${round} 轮：clear 应成功`)
+        const reopened = createGrantStore(grantLedgerPath(profile))
+        assert.equal(reopened.check(p, 'edit').hit, false, `第 ${round} 轮：撤销必须跨重启生效`)
+      }
+    } finally { Date.now = realNow }
+    ok('第四轮 clear/回拨/remember 六轮交替，每轮撤销都跨重启生效')
+  }
+
   console.log(`grant-store: ${passed} 组场景通过`)
 } finally {
   rmSync(root, { recursive: true, force: true })
