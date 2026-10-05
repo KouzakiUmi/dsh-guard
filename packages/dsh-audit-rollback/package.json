@@ -2,7 +2,6 @@
   "name": "dsh-audit-rollback",
   "displayName": "审计与回滚（audit ledger + rollback）",
   "version": "0.3.2",
-  "private": true,
   "description": "Persistent audit ledger + precise rollback for DeepSeek Harness file-tool edits: capture pre-edit bytes into a content-addressed store per turn, roll back offline via a standalone CLI.",
   "type": "module",
   "engines": {
@@ -52,6 +51,9 @@
     "ledger"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-0 <0.3.0-0",
     "@deepseek-ai/schemastery": "~3.18.5-alpha.1"

@@ -13,7 +13,14 @@ DeepSeek Harness 的文件审计、回滚和自动审批工具集。两个插件
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/KouzakiUmi/dsh-guard/releases) 获取对应插件 tarball，通过目标 profile 的官方插件管理入口安装。
+从 npm 安装对应插件包，再通过目标 profile 的官方插件管理入口添加该包。也可从 [GitHub Releases](https://github.com/KouzakiUmi/dsh-guard/releases) 获取 tarball 离线安装。
+
+```sh
+npm pack dsh-audit-rollback@0.3.2
+npm pack dsh-auto-review-router@0.3.2
+```
+
+`npm pack` 会下载包到当前目录，随后把 tarball 路径传给 DSH 插件管理命令。桌面与非桌面 profile 的安装边界见下文。
 
 非桌面 profile 可使用：
 
