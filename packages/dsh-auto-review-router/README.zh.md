@@ -1,14 +1,27 @@
-# dsh-auto-review-router 0.3.1
+# dsh-auto-review-router 0.3.2
 
-可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。0.3.0 起增加官方人工审批继承及按会话隔离的持久审批历史；GUI 实机验收在发布安装后另行记录。
+可指定 reviewer provider、model、effort 的 Auto 审查门。目标核心为 `@deepseek-ai/dsh 0.2.1-alpha.1`；使用同版本官方 Settings / ConfigEditor 与 Schemastery volatile Config，不自建配置存储、不手写用户 profile。0.3.0 起增加官方人工审批继承及按会话隔离的持久审批历史；0.3.2 起增加目录级授权记忆。GUI 实机验收在发布安装后另行记录。
 
 ## 审批历史与人工审批继承（开发树）
 
 - 仅合法 reviewer `deny` 可进入人工继承；reviewer 错误、协议/路由无效、超时或缺 schema 仍 fail-closed。有效审批策略为 `never` 时不发起人工提示；`manualFallback=false` 时同样不提示。
 - 默认人工等待 60 秒（可配 1,000–300,000 ms）。超时通过传给官方审批请求的 AbortSignal 取消该请求；超时、卸载或关闭不会把迟到的人工允许转成放行。人工 `allowed-once` 之后仍由核心执行最终 guard/取消检查。
-- 会话「审批历史」Tab 与 composer dock 的结果摘要是 SDK `0.2.1-alpha.1` 所支持的视图：**不是每张工具卡片徽标，也不是轨迹行内提示**。`reported-result` 只代表框架报告，不能证明工具 body 确实执行；不得把它显示成已执行保证。
+- 会话「审批历史」Tab 与**工具调用条目下方的结果卡**是 SDK `0.2.1-alpha.1` 所支持的视图：卡片注册在 `conversation.chat.turnTail`（按 dispatchId 聚合，一次被审查的调用一张卡），另加「审批历史」Tab 与 composer dock 摘要。**不是每张工具卡片徽标，也不是轨迹行内提示** —— `tool.call.toolview` 会被官方已随包发布的 UI 遮蔽，已实测不可用。`reported-result` 只代表框架报告，不能证明工具 body 确实执行；不得把它显示成已执行保证。
+- 主卡片按严重度选取而非账本序（拒绝/失败优先于放行），并标注「命中已授权目录，未询问」，以便与用户亲自放行区分。
 - 历史写入 profile 下独立 JSONL，不向 alpha.1 的 Session 文件追加私有事件。每个会话 ledger 最多 16 MiB，达到上限后记录缺口，不自动轮转/删除；串行化只覆盖同一 Host 进程的 writer，不是跨进程原子锁。缺 profile、队列满、损坏或读写失败会显示健康缺口，不改变审批决定。
 - 持久内容采用字段 allowlist 和摘要遮罩，但遮罩只是尽力降低泄漏风险，不能识别任意秘密。账本不应被视为通用敏感信息脱敏器。
+
+## 目录级授权记忆（0.3.2）
+
+中风险调用在人工放行后，可把「这个目录下的同类操作」记下来，之后不再重复打扰。**这是询问抑制器，不是权限收窄器** —— 命中的调用仍走完整的上游 reviewer 与下游 guard，只是不再弹窗。核心策略为 `never` 时不进入该路径（`dsh-user-approval` 在 waterfall 之前就返回 `rejected`）。
+
+- 授权粒度是**目录 + 操作类别**（新建文件 / 文件编辑）。delete、move/rename 与 shell 类永不记忆；删除与移动的 destination 不参与判定，纳入前一律重新询问。
+- 期限 30 天、最多 100 次命中，超限即重新询问。设置页提供「撤销所有已授权目录」，撤销写 epoch 墓碑，跨重启生效。
+- **提示与实际授予严格一致**：弹窗写明具体命令、会被记住的目录、期限与次数，以及哪些情况仍会询问；不可授权时如实写「仅对本次调用生效」。文案与写入走同一份判定实现（`grant-store.js` 的 `evaluate()`），不会出现「提示说会记住、实际没记」或反过来的错配。
+- 永不记忆的目标：`.git` / `.codex` / `.agents` / `.ssh` / `.dsh` 等受保护段，`*.env` 与 `*.env.*`，凭据文件名（`.npmrc`、`id_rsa`、`credentials.json` 等），以及过宽的根（盘根、用户 profile 根、系统与凭据目录、AppData、ProgramData 等）。**授权键锚定规范化后的实际目标**（逐级 lstat + realpath 校验），不是 UI 或模型给出的展示字符串。
+- 目标文件本身也被校验：已存在时必须是普通文件、非符号链接、硬链接数为 1，且 realpath 与词法一致 —— 否则「写进来」可能等于「写到别处去」。
+- 账本是 profile 下的 append-only JSONL，按行数上界压实（临时文件 + rename 覆盖）。同路径的多个 store 实例共享进程内状态，读写前按 mtime/size 重读，避免压实时抹掉别的实例刚写的授权。
+
 
 ## 工具 schema 来源（0.2.3 修复）
 

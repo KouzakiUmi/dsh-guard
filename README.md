@@ -19,10 +19,10 @@
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 回滚 + 会话内已修改文件预览/二次确认恢复；带可编辑设置页 | 0.3.1 |
-| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 可配置 reviewer 路由、合法高危拒绝转官方单次人工审批、审批阶段历史与结果摘要；带可编辑设置页 | 0.3.1 |
+| [`packages/dsh-audit-rollback`](packages/dsh-audit-rollback) | 编辑前内容捕获（SHA-1 内容寻址）+ 逐轮 JSONL 审计账本 + 离线 CLI 回滚 + 会话内已修改文件预览/二次确认恢复；带可编辑设置页 | 0.3.2 |
+| [`packages/dsh-auto-review-router`](packages/dsh-auto-review-router) | 可配置 reviewer 路由、合法高危拒绝转官方单次人工审批、审批阶段历史与结果摘要（工具条目下方）、目录级授权记忆；带可编辑设置页 | 0.3.2 |
 
-以上是工作区开发树的实现描述，不代表这些改动已在 GUI 实机验收。基线版本 `0.3.1`。
+以上是工作区开发树的实现描述，不代表这些改动已在 GUI 实机验收。基线版本 `0.3.2`。
 
 业务存储逻辑只使用 `node:*`；配置声明使用宿主提供的官方 schema peer，设置写入走宿主 `settings` / `configEditor`，不捆绑另一套 DSH 核心，不另建配置文件。
 
