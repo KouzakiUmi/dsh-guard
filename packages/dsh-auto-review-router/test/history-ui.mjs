@@ -213,7 +213,17 @@ console.log('PASS Tab copy distinguishes service-unavailable from ledger failure
 {
   const client = factory(), registrations = [], effects = [], mounts = [], requests = []
   let response = { ok: true, value: page([record(1)]) }
-  const service = { async history(request) { requests.push(serial(request)); return response } }
+  const grantRequests = []
+  let grantResponse = { available: true, reason: null, revoked: false,
+    grants: [{ dir: 'd:\\proj', opClass: 'edit', tool: 'edit', at: 1, useCount: 2 }] }
+  const service = {
+    async history(request) { requests.push(serial(request)); return response },
+    async grants(request) {
+      grantRequests.push(serial(request))
+      // 与真实 typert RPC 一致：返回 {ok, value} 信封，客户端先校验再 unwrap。
+      return { ok: true, value: grantResponse }
+    },
+  }
   const ctx = {
     locale: { register() { return () => {} }, bind() { return key => client.dictionaries.zh[key] || key } },
     remote: { $mount(descriptor) { mounts.push(descriptor); return Promise.resolve(() => {}) } },
@@ -225,6 +235,7 @@ console.log('PASS Tab copy distinguishes service-unavailable from ledger failure
   assert.deepEqual(registrations.map(row => row.options.name), ['settings.plugins.tab', 'conversation.view', 'conversation.chat.turnTail'])
   assert.equal(registrations.filter(row => row.options.name === 'settings.plugins.tab').length, 1)
   const tab = registrations[1].options.inject(), turnCard = registrations[2].options.inject()
+  const settingsPage = registrations[0].options.inject()
   assert.equal(tab.history, turnCard.history); assert.equal(requests.length, 0)
   const history = tab.history.source('A'), offTab = history.subscribe(() => {}), offDock = history.subscribe(() => {}); await flush()
   assert.equal(requests.length, 1); assert.deepEqual(requests[0], { sessionId: 'A', limit: 50 })
@@ -236,6 +247,20 @@ console.log('PASS Tab copy distinguishes service-unavailable from ledger failure
   assert.deepEqual(serial(descriptor.parameters.map(({ name, wire, source, codec }) => ({ name, wire, source, mode: codec.mode, typeSymbol: codec.typeSymbol }))), [{ name: 'request', wire: 'request', source: 'json', mode: 'strict', typeSymbol: 'dsh-auto-review-router#ApprovalHistoryRequest' }])
   assert.equal(descriptor.result.typeSymbol, 'dsh-auto-review-router#ApprovalHistoryResult')
   assert.equal(descriptor.result.create().parse, client.parseHistoryResult)
+  // 设置页的 grants 入口必须真的能调通。
+  // 2026-10-05 现场缺陷：这个闭包误用了上层 readHistory(query, signal) 的形参，
+  // 一调用就 `ReferenceError: signal is not defined`；而当时没有任何测试调用它
+  // （settings.mjs 渲染时根本没传 grants，loadGrants 提前返回把问题盖住了）。
+  assert.equal(typeof settingsPage.grants, 'function', '设置页 inject 必须提供 grants')
+  const listed = await settingsPage.grants(false)
+  assert.deepEqual(serial(grantRequests), [{ revoke: false }], '只读查询不得请求撤销')
+  assert.equal(listed.grants.length, 1)
+  assert.equal(listed.revoked, false)
+  grantResponse = { available: true, reason: null, revoked: true, grants: [] }
+  const revoked = await settingsPage.grants(true)
+  assert.deepEqual(serial(grantRequests), [{ revoke: false }, { revoke: true }])
+  assert.equal(revoked.revoked, true, '撤销必须返回 revoked')
+  assert.equal(revoked.grants.length, 0)
   for (const value of effects.reverse()) { const off = await value; if (typeof off === 'function') await off() }
   assert.equal(registrations.length, 0); assert.equal(history.getSnapshot().status, 'disposed')
   const count = requests.length; await history.refresh(); assert.equal(requests.length, count); offTab(); offDock()

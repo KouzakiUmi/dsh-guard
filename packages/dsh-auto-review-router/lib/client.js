@@ -75,7 +75,7 @@ window.__ModuleLoader__.load({
       grantsEdit: '文件编辑',
       grantsRevoke: '撤销所有已授权目录',
       grantsRevokeConfirm: '确认撤销',
-      grantsRevokeCancel: '取消',
+      grantsRevokeCancel: '保留授权',
       grantsRevokeWarning: '撤销后，这些目录下的操作会重新逐次询问。已放行的调用不受影响。',
     }
     const en = {
@@ -141,7 +141,7 @@ window.__ModuleLoader__.load({
       grantsEdit: 'file edit',
       grantsRevoke: 'Revoke all granted directories',
       grantsRevokeConfirm: 'Confirm revoke',
-      grantsRevokeCancel: 'Cancel',
+      grantsRevokeCancel: 'Keep grants',
       grantsRevokeWarning: 'After revoking, operations in those directories will ask again every time. Already-approved calls are unaffected.',
     }
 
@@ -206,6 +206,22 @@ window.__ModuleLoader__.load({
       ],
     }
     // Browser-side mirrors of the Host parsers. No Node module import; same fail-closed contract.
+    // 与 parseHistoryResult 同款：先校验 typert 信封，再 unwrap 取 value。
+    // 描述符里的 parseGrantsResult 校验的是**载荷**（信封的 value），
+    // 这里校验信封本身，两层合起来才是完整的 fail-closed。
+    function parseGrantsEnvelope(value) {
+      if (!plain(value) || typeof value.ok !== 'boolean') throw new TypeError('Invalid grants result')
+      if (!value.ok) {
+        if (Object.keys(value).some(key => !['ok', 'error'].includes(key)) || !plain(value.error)
+          || Object.keys(value.error).some(key => !['code', 'message'].includes(key))) {
+          throw new TypeError('Invalid grants error')
+        }
+        return value
+      }
+      if (Object.keys(value).some(key => !['ok', 'value'].includes(key))) throw new TypeError('Invalid grants result')
+      parseGrantsResult(value.value)
+      return value
+    }
     function parseGrantsRequest(value) {
       if (value === undefined || value === null) return { revoke: false }
       if (typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_GRANTS_REQUEST')
@@ -901,6 +917,10 @@ window.__ModuleLoader__.load({
        * 已授权目录：读列表 / 全部撤销。
        * 撤销是用户拿回控制权的动作 —— 没有这个入口，store.clear() 修得再对也够不着。
        */
+      // 与同页 call() 同款：用 disposed 检查，不引 signal ——
+      // signal 只是上面 readHistory(query, signal) 的形参，在这里并不存在。
+      // 2026-10-05 现场修复：此处曾误用 signal，导致设置页一加载就
+      // `ReferenceError: signal is not defined`。
       const grants = async (revoke) => {
         const deadline = Date.now() + 20000
         await mounted
@@ -909,12 +929,12 @@ window.__ModuleLoader__.load({
           const service = ctx.get('remote.autoReviewRouter')
           if (service !== undefined) {
             if (typeof service.grants !== 'function') throw new Error('Host grants is unavailable')
-            const value = unwrap(await abortable(service.grants({ revoke }), signal), t)
+            const value = unwrap(parseGrantsEnvelope(await service.grants({ revoke })), t)
             if (disposed) throw new Error('Client disposed')
             return value
           }
           if (Date.now() > deadline) throw new Error('remote.autoReviewRouter 挂载超时（20 秒）')
-          await abortable(new Promise(resolve => setTimeout(resolve, 250)), signal)
+          await new Promise((resolve) => setTimeout(resolve, 250))
         }
       }
       const call = async (method) => {

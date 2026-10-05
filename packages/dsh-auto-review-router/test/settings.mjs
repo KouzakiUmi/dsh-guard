@@ -70,7 +70,17 @@ for (const language of ['zh', 'en']) {
   }, t)
   const call = async () => ({ plugin: 'dsh-auto-review-router', enabled: false, registration: { observed: true, registered: false, conflict: false }, route: { source: 'session-fallback' }, budget: {} })
   const loadCatalog = async () => ({ groups: [], failures: [] })
-  const render = () => { cursor = 0; tree = ui.RouterPage({ call, settings, loadCatalog, t }); for (const effect of pendingEffects.splice(0)) effect(); return tree }
+  // 设置页的「已授权目录」区块需要 grants 注入。此前这里**没传**，
+  // loadGrants 因 typeof grants !== 'function' 提前返回，把该区块整段跳过 ——
+  // 于是里面的 ReferenceError 一直没被任何测试发现。
+  const grantCalls = []
+  let grantList = [{ dir: 'D:\\proj', opClass: 'edit', tool: 'edit', at: 1, useCount: 3 }]
+  const grants = async (revoke) => {
+    grantCalls.push(revoke)
+    if (revoke) grantList = []
+    return { available: true, reason: null, revoked: revoke === true, grants: grantList.map(g => ({ ...g })) }
+  }
+  const render = () => { cursor = 0; tree = ui.RouterPage({ call, settings, loadCatalog, grants, t }); for (const effect of pendingEffects.splice(0)) effect(); return tree }
   const walk = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(walk)] : []
   const text = node => typeof node === 'object' ? node.children.map(text).join(' ') : String(node)
   const button = key => walk(tree).find(node => node.type === 'button' && text(node) === t(key))
@@ -82,6 +92,25 @@ for (const language of ['zh', 'en']) {
   assert.equal(input('manualApprovalTimeoutMs').props.value, 60000)
   assert.ok(text(tree).includes(t('manualNote')))
   assert.ok(text(tree).includes(t('auditNote')))
+  // 已授权目录区块：必须真的加载并渲染出来（此前整段被跳过）。
+  await flush()
+  assert.deepEqual(grantCalls, [false], '挂载时应只读查询一次，不得自动撤销')
+  assert.ok(text(tree).includes(t('grantsTitle')), '必须渲染已授权目录区块')
+  assert.ok(text(tree).includes('D:\\proj'), `必须列出已授权目录：${text(tree)}`)
+  assert.ok(text(tree).includes(t('grantsEdit')), '必须标明操作类别')
+  // 撤销必须二次确认：第一次点击只展开确认，不得直接撤销。
+  const revokeButton = button('grantsRevoke')
+  assert.ok(revokeButton, '有授权时必须提供撤销按钮')
+  revokeButton.props.onClick(); render()
+  assert.deepEqual(grantCalls, [false], '首次点击不得直接撤销')
+  assert.ok(button('grantsRevokeConfirm'), '必须先出现确认按钮')
+  button('grantsRevokeCancel').props.onClick(); render()
+  assert.ok(button('grantsRevoke'), '取消后回到初始状态')
+  assert.deepEqual(grantCalls, [false], '取消不得撤销')
+  button('grantsRevoke').props.onClick(); render()
+  button('grantsRevokeConfirm').props.onClick(); await flush()
+  assert.deepEqual(grantCalls, [false, true], '确认后才真正撤销')
+  assert.ok(text(tree).includes(t('grantsEmpty')), '撤销后显示为空')
   input('enabled').props.onChange({ target: { checked: true } }); render()
   assert.equal(button('save').props.disabled, false)
   button('cancel').props.onClick(); render()
