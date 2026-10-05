@@ -8,7 +8,7 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from './policy.js'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Config, DEFAULT_CONFIG, normalizeConfig } from './config.js'
 import { createApprovalHistory, parseHistoryRequest, parseHistoryResult } from './approval-history.js'
-import { createGrantStore, grantLedgerPath, targetPathOf, operationClassOf } from './grant-store.js'
+import { createGrantStore, targetPathOf, operationClassOf } from './grant-store.js'
 export { Config, DEFAULT_CONFIG, normalizeConfig }
 import {
   absoluteCwd,
@@ -330,15 +330,10 @@ function exposeRouterRemote(ctx) {
 export function apply(ctx, rawConfig, historyOptions) {
   const readConfig = () => normalizeConfig(rawConfig)
   const history = createApprovalHistory(ctx, historyOptions)
-  // 授权记忆：与审批历史同在 profile 目录，取不到目录时禁用记忆（退化为每次询问）。
-  let grants = null
-  try {
-    const profileDir = ctx.profileContext?.dir
-    if (typeof profileDir === 'string' && profileDir !== '') grants = createGrantStore(grantLedgerPath(profileDir))
-  } catch (error) {
-    ctx.logger?.warn?.(`auto-review-router: 授权记忆不可用，将每次询问：${error instanceof Error ? error.message : String(error)}`)
-    grants = null
-  }
+  // 授权记忆：**本次运行内有效，纯内存不落盘**。
+  // 不再依赖 profileContext，也不再需要账本目录 —— 取出即用，不会创建失败。
+  // 重启后自然清空，等价于「重新逐次询问」。
+  const grants = createGrantStore()
   const snap = { readConfig, history, grants, attempted: false, registered: false, conflict: false, closeFailed: false, error: null }
   runtimeByCtx.set(ctx, snap)
   const offHistorySession = ctx.on?.('session/event', (session, event) => history.sessionEvent(session, event))
@@ -530,18 +525,16 @@ const NOOP_GRANTS = {
 
 const sessionIdOf = (session) => (session && typeof session.id === 'string' ? session.id : 'unknown')
 
-/** 与 grant-store 的默认上限保持一致；文案必须说出真实数字，不能含糊。 */
-const GRANT_MAX_USES = 100
-const GRANT_MAX_AGE_DAYS = 30
-
 /**
  * 这次人工放行**会不会**被授权记忆吸收，以及吸收的范围。
- * 返回 null 表示「只对本次生效」——文案必须如实这么写（HIGH-4）。
+ * 返回 null 表示「只对本次生效」——文案必须如实这么写。
  *
  * 判定一律走 store.preview()，与 remember()/check() 同一份实现。
  * 2026-10-05 复核实证：文案与 remember 各自重算判定时出现过两类错配 ——
- * delete 类文案承诺会记住而 remember 必然拒绝；.env 目标承诺 30 天免问而
+ * delete 类文案承诺会记住而 remember 必然拒绝；.env 目标承诺免问而
  * check 恒返回 protected-path。
+ *
+ * 作用域是**本次运行**：不落盘、不跨重启。文案必须说清楚，不能暗示长期有效。
  */
 function grantableOutcome(exec, config, store) {
   if (!config.manualFallback) return null
@@ -560,8 +553,6 @@ function grantableOutcome(exec, config, store) {
     // 用户核对授权范围时才不会看到与磁盘不一致的大小写。
     scopeText: { en: `${opLabel.en} under ${verdict.dirPath ?? verdict.dir}`,
       zh: `${verdict.dirPath ?? verdict.dir} 下的${opLabel.zh}` },
-    days: GRANT_MAX_AGE_DAYS,
-    maxUses: GRANT_MAX_USES,
   }
 }
 
@@ -617,16 +608,16 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
   const summary = summarizeCall(exec)
   const riskLabel = risk === 'high' ? { en: 'high', zh: '高危' } : { en: 'medium', zh: '中风险' }
   const detail = summary === undefined ? '' : `\n${summary}`
-  // HIGH-4：文案必须与实际授予一致。用户若不知道「放行会记住这个目录」，
-  // 就在毫不知情的情况下签了一份 30 天 / 100 次 / 整棵子树的授权。
-  // 以下三点必须同时出现在提示里：具体命令、会记住什么、记住多久。
+  // 文案必须与实际授予一致。用户若不知道「放行会记住这个目录」，
+  // 就在毫不知情的情况下签了一份整棵子树的授权。
+  // 以下三点必须同时出现在提示里：具体命令、会记住什么、记多久。
   const grant = grantableOutcome(exec, config, grantMemoFor(state, exec))
   const grantLine = grant === null ? {
     en: 'This decision applies to this single call only — nothing will be remembered.',
     zh: '本次决定仅对这一次调用生效，不会被记住。',
   } : {
-    en: `Allowing it will also remember this grant: ${grant.scopeText.en} will not ask again for ${grant.days} days (up to ${grant.maxUses} times). Sensitive paths (.git, .env, credentials) and delete operations always ask again.`,
-    zh: `放行后将同时授予一项长期授权：${grant.scopeText.zh} 在 ${grant.days} 天内不再询问（最多 ${grant.maxUses} 次）。敏感路径（.git、.env、凭据目录）与删除操作每次仍会询问。`,
+    en: `Allowing it also remembers this for the current run: ${grant.scopeText.en} will not ask again until DSH restarts. Sensitive paths (.git, .env, credentials) and delete operations always ask again.`,
+    zh: `放行后本次运行内不再询问：${grant.scopeText.zh}（重启 DSH 后恢复逐次询问）。敏感路径（.git、.env、凭据目录）与删除操作每次仍会询问。`,
   }
   try {
     const response = await history.invokeManual(entry, () => ctx.approval.request({
@@ -647,12 +638,17 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
     clearTimeout(timer)
     const outcome = ['allowed-once', 'rejected', 'cancelled', 'unavailable'].includes(response) ? response : 'unavailable'
     const final = controller.signal.aborted ? 'cancelled' : outcome
-    // R6：只有用户显式放行才写记忆。放行本身即显式授权。
-    // 2026-10-05 第三轮复核实证（MEDIUM-2）：记忆写入必须发生在 manualOutcome **之前** ——
-    // 那是 manual 行唯一的落账点，事后往 entry 上挂字段永远不会进账本
-    // （record() 只透传白名单字段，且不读 entry 上的任意属性）。
+    // R6：只有用户显式放行才写记忆。`final === 'allowed-once'` 就是「用户显式放行」
+    // 的事实来源，不需要额外前置。
+    //
+    // 2026-10-05：原先这里还要求 `entry?.approvalRequestId` —— 它由 SDK 的
+    // `approval/asked` 事件异步带入。结果是：任何拦截 `approval/request` 的调用方
+    // （包括本仓的测试夹具）都拿不到它，写入分支从不执行，「放行后真的记住了吗」
+    // 这条集成路径因此从未被验证过。approvalRequestId 现在只作为可选的审计关联。
+    // 记忆写入必须发生在 manualOutcome **之前** —— 那是 manual 行唯一的落账点，
+    // 事后往 entry 上挂字段永远不会进账本（record() 只透传白名单字段）。
     let grantCause = null
-    if (final === 'allowed-once' && risk === 'medium' && entry?.approvalRequestId) {
+    if (final === 'allowed-once' && risk === 'medium') {
       const memo = grantMemoFor(state, exec)
       const target = targetPathOf(exec.arguments)
       const opClass = operationClassOf(exec.name, exec.arguments)
@@ -660,14 +656,13 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
         let result = { ok: false, reason: 'store-unavailable' }
         try {
           result = memo.remember(target, opClass, {
-            session: sessionIdOf(exec.agent?.session),
             tool: exec.name,
-            approvalRequestId: entry.approvalRequestId,
+            approvalRequestId: entry?.approvalRequestId,
           })
         } catch {
           result = { ok: false, reason: 'threw' }
         }
-        // N6：写入失败必须留痕 —— 用户和审计都应知道「记忆没生效」，
+        // 写入失败必须留痕 —— 用户和审计都应知道「记忆没生效」，
         // 而不能只靠「下次又问」反推。cause 是 record() 白名单里的字段。
         grantCause = result.ok ? 'granted-directory' : `grant-not-stored:${String(result.reason).slice(0, 40)}`
         if (!result.ok) {

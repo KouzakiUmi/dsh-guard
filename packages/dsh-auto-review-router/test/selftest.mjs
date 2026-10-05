@@ -333,17 +333,21 @@ function execOf(overrides = {}) {
 }
 
 async function gate(options, execOverrides = {}, nextImpl) {
-  const ctx = fakeCtx(options)
-  apply(ctx, {
-    enabled: true,
-    reviewerProvider: options.reviewerProvider ?? 'review-provider',
-    reviewerModel: options.reviewerModel ?? 'review-model',
-    reviewerEffort: options.reviewerEffort ?? '',
-    fallbackToSessionRoute: options.fallbackToSessionRoute ?? true,
-    timeoutMs: options.timeoutMs ?? 20000,
-    logDecisions: false,
-    maxContextBytes: options.maxContextBytes ?? 32768,
-  })
+  // 传 options.ctx 可复用同一个运行时（连同它的授权记忆），用于验证跨调用行为。
+  // 复用时不再 apply —— 重复 apply 会建出第二个运行时，授权记忆也就不再是同一份。
+  const ctx = options.ctx ?? fakeCtx(options)
+  if (options.ctx === undefined) {
+    apply(ctx, {
+      enabled: true,
+      reviewerProvider: options.reviewerProvider ?? 'review-provider',
+      reviewerModel: options.reviewerModel ?? 'review-model',
+      reviewerEffort: options.reviewerEffort ?? '',
+      fallbackToSessionRoute: options.fallbackToSessionRoute ?? true,
+      timeoutMs: options.timeoutMs ?? 20000,
+      logDecisions: false,
+      maxContextBytes: options.maxContextBytes ?? 32768,
+    })
+  }
   const sub = ctx.listeners.find((item) => item.name === 'tools/pre-execute')
   if (!sub) throw new Error('未注册 tools/pre-execute')
   let nextCalls = 0
@@ -435,8 +439,8 @@ await checkAsync('deny + ask → 官方人工请求，拒绝不放行', async ()
   assert(request.signal instanceof AbortSignal, '必须向官方审批传请求级取消信号')
 })
 
-// HIGH-4 正向：可授权的调用必须在提示里写明会记住什么、记多久。
-await checkAsync('可授权调用的提示必须声明将记住目录与期限', async () => {
+// 正向：可授权的调用必须在提示里写明会记住什么、作用域多大。
+await checkAsync('可授权调用的提示必须声明将记住目录与作用域', async () => {
   const grantDir = mkdtempSync(join(root, 'grantable-'))
   mkdirSync(join(grantDir, 'sub'), { recursive: true })
   const { ctx } = await gate(
@@ -444,9 +448,9 @@ await checkAsync('可授权调用的提示必须声明将记住目录与期限',
     { arguments: { file_path: join(grantDir, 'sub', 'new.txt') } },
   )
   const request = ctx.calls.approvals[0]
-  assert(/放行后将同时授予一项长期授权/.test(request.displayReason?.zh), `必须声明会记住目录：${request.displayReason?.zh}`)
-  assert(/30 天/.test(request.displayReason?.zh), '必须写明 30 天期限')
-  assert(/100 次/.test(request.displayReason?.zh), '必须写明次数上限')
+  assert(/放行后本次运行内不再询问/.test(request.displayReason?.zh), `必须声明会记住目录：${request.displayReason?.zh}`)
+  // 作用域必须说清楚是「本次运行」而不是长期 —— 授权不落盘、重启即失效。
+  assert(/重启 DSH 后恢复逐次询问/.test(request.displayReason?.zh), '必须写明作用域止于重启')
   assert(/敏感路径/.test(request.displayReason?.zh), '必须说明哪些情况仍会询问')
   // 文案必须把路径说清楚（用户要能核对授权的是哪个目录）
   assert(new RegExp(`${grantDir.replace(/\\/g, '\\\\')}`).test(request.displayReason?.zh),
@@ -544,35 +548,41 @@ await checkAsync('run_code 外层调用不被审查', async () => {
 // 授权记忆的撤销入口。2026-10-05：store.clear() 写了很久，但此前**没有任何调用方**
 // —— 设置页与 RPC 都没接，用户根本没有拿回控制权的路径。queryGrants 是
 // 设置页「撤销所有已授权目录」的 Host 侧实现，这里锁住它真的能用。
-await checkAsync('授权撤销入口可读可撤', async () => {
-  const dir = join(profileDir, 'revoke-target')
+// 这条同时补上一个此前完全没验证过的集成：**用户放行 → 真的写入授权**。
+// 之前没有任何测试走通它（写入分支依赖 SDK 异步带入的 approvalRequestId，
+// 而测试夹具拦截了那次 append），所以「功能是否生效」一直无从证明。
+await checkAsync('放行后授权生效、撤销后失效（集成）', async () => {
+  const dir = join(profileDir, 'grant-target')
   mkdirSync(dir, { recursive: true })
-  const file = join(dir, 'a.txt')
-  writeFileSync(file, 'x')
-  // 直接建 store 写入一条授权，避开完整的审批往返。
-  const { createGrantStore, grantLedgerPath } = await import('../lib/grant-store.js')
-  const store = createGrantStore(grantLedgerPath(profileDir))
-  const written = store.remember(file, 'edit', { session: 's', tool: 'edit', approvalRequestId: 'r' })
-  assert(written.ok, `写入授权应成功（${JSON.stringify(written)}）`)
+  const target = join(dir, 'a.txt')
 
-  // 用同一 profile 目录建运行时，使 queryGrants 能拿到 store。
-  const ctx = fakeCtx({ policy: 'ask', stream() { return decisionStream('{"risk":"medium","decision":"deny","reason":"x"}') } })
-  ctx.profileContext = { dir: profileDir }
-  apply(ctx, { enabled: true, reviewerProvider: 'p', reviewerModel: 'm', timeoutMs: 20000 })
-
+  // 第一次调用：人工放行 → 应写入授权
+  const { ctx } = await gate(
+    { policy: 'ask', manualResponse: 'allowed-once',
+      stream() { return decisionStream('{"risk":"medium","decision":"deny","reason":"outside workspace"}') } },
+    { arguments: { file_path: target } },
+  )
   const listed = queryGrants(ctx)
   assert(listed.available === true, '授权列表应可用')
-  assert(listed.revoked === false, '只读查询不得撤销')
-  assert(listed.grants.length >= 1, `应至少列出刚写入的授权（实际 ${listed.grants.length}）`)
+  assert(listed.grants.length === 1, `放行后应写入一条授权（实际 ${JSON.stringify(listed.grants)}）`)
+  // execOf 默认工具名是 edit；授权粒度是「目录 + 操作类别」，类别必须记录正确
+  assert(listed.grants[0].opClass === 'edit', `edit 应归为 edit（实际 ${listed.grants[0].opClass}）`)
 
+  // 第二次调用同一目录：不应再产生人工审批请求
+  const before = ctx.calls.approvals.length
+  await gate(
+    { policy: 'ask', manualResponse: 'allowed-once', ctx,
+      stream() { return decisionStream('{"risk":"medium","decision":"deny","reason":"outside workspace"}') } },
+    { arguments: { file_path: join(dir, 'b.txt') } },
+  )
+  assert(ctx.calls.approvals.length === before,
+    `同目录第二次调用不应再询问（实际多出 ${ctx.calls.approvals.length - before} 次）`)
+
+  // 撤销
   const revoked = queryGrants(ctx, { revoke: true })
   assert(revoked.revoked === true, '撤销必须成功')
   assert(revoked.grants.length === 0, '撤销后不得残留')
   assert(queryGrants(ctx).grants.length === 0, '撤销后列表为空')
-  // 撤销的权威判据是「跨重启不再命中」——单进程内的另一个实例可能还持有
-  // 旧缓存（同路径共享状态按 mtime/size 判定，粒度有限）。
-  const reopened = createGrantStore(grantLedgerPath(profileDir))
-  assert(reopened.check(file, 'edit').hit === false, '撤销后重启不得再命中（墓碑必须跨重启生效）')
 })
 
 // profileDir 必须在最后清理：撤销用例（上面）仍在用它建 store。

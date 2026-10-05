@@ -1,19 +1,22 @@
 // 授权记忆（询问抑制器）的安全边界回归。零网络、零模型、只用临时目录。
-// 2026-10-05 第二次扩充：加入独立安全复核实证的 junction 逃逸、.git 绕过、
-// 账本伪造矩阵、useCount 落盘与过期复活等反例。
+// 2026-10-05 改造：授权记忆改为**本次运行内有效（纯内存）**，原先验证落盘、
+// 压实、墓碑、时钟回拨、多实例并发的场景已随持久化层一并删除。
+// 保留的是与存储无关的路径安全判定：junction/hardlink 逃逸、敏感段、
+// 过宽根、操作类别、判定同源。
 import './runtime.mjs'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, existsSync, rmSync, linkSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, readFileSync, rmSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
-import { createGrantStore, targetPathOf, operationClassOf, grantLedgerPath,
+import { createGrantStore, targetPathOf, operationClassOf,
   isProtectedTarget, isTooBroadRoot, verifyAncestors, isInside, canonicalPathKey } from '../lib/grant-store.js'
 
 // 不用 os.tmpdir()：它落在 %LOCALAPPDATA%\Temp 下，而 AppData 是授权记忆的
 // 敏感段（MEDIUM-1 修复），会把 fixture 判成过宽根。改用 D 盘根下的
 // 一次性目录，语义上等价于「普通项目目录」。
 const root = mkdtempSync('D:\\dsh-grant-test-')
-const evidence = { session: 's', tool: 'edit', approvalRequestId: 'r' }
-const store = (name = 'g') => createGrantStore(grantLedgerPath(join(root, name)))
+const evidence = { tool: 'edit', approvalRequestId: 'r' }
+// 内存 store：每次调用建一个独立实例；作用域是本次运行，无落盘。
+const store = () => createGrantStore()
 const dir = (name) => { const d = join(root, name); mkdirSync(d, { recursive: true }); return d }
 const file = (p, content = 'x') => { writeFileSync(p, content); return p }
 let passed = 0
@@ -181,131 +184,33 @@ try {
     ok('MEDIUM-1 R8：敏感子树拒、普通项目目录不连坐')
   }
 
-  // ── MEDIUM-2 useCount 落盘（重启不归零）──────────────────────────
-  {
-    const name = 'r10'
-    const s = store(name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    s.remember(p, 'edit', evidence)
-    for (let i = 0; i < 5; i += 1) assert.equal(s.check(p, 'edit').hit, true, `第 ${i + 1} 次命中`)
-    const raw = readFileSync(grantLedgerPath(join(root, name)), 'utf8')
-    const counts = raw.trim().split('\n').map(l => JSON.parse(l).useCount)
-    assert.ok(counts[counts.length - 1] >= 5, `useCount 必须落盘（实际 ${JSON.stringify(counts)}）`)
-    // 重新 open（模拟重启）：计数应延续而不是归零
-    const reopened = store(name)
-    assert.equal(reopened.check(p, 'edit').hit, true)
-    const raw2 = readFileSync(grantLedgerPath(join(root, name)), 'utf8')
-    const last = JSON.parse(raw2.trim().split('\n').pop())
-    assert.ok(last.useCount >= 6, `重启后计数必须延续（实际 ${last.useCount}）`)
-    ok('MEDIUM-2 useCount 落盘，重启不归零')
-  }
-
-  // ── MEDIUM-6 过期授权可复活 ──────────────────────────────────────
-  {
-    const name = 'expired'
-    const s = store(name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    s.remember(p, 'edit', evidence)
-    // 手工把 at 改到 31 天前
-    const file_ = grantLedgerPath(join(root, name))
-    const lines = readFileSync(file_, 'utf8').trim().split('\n')
-    const old = JSON.parse(lines[0]); old.at = Date.now() - 31 * 24 * 3600 * 1000
-    writeFileSync(file_, `${JSON.stringify(old)}\n`)
-    const fresh = store(name)
-    assert.equal(fresh.check(p, 'edit').hit, false, '过期后不再命中')
-    assert.equal(fresh.check(p, 'edit').reason, 'expired', '原因标记为 expired')
-    assert.deepEqual(fresh.remember(p, 'edit', evidence), { ok: true, reason: 'stored' },
-      '过期后重新批准必须能写新行复活')
-    assert.equal(store(name).check(p, 'edit').hit, true, '复活后重新命中')
-    ok('MEDIUM-6 过期授权可重新批准复活')
-  }
-
-  // ── MEDIUM-5 check 不被浅层/超限记录遮蔽 ────────────────────────
-  {
-    const name = 'shadow'
-    const s = store(name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    const file_ = grantLedgerPath(join(root, name))
-    mkdirSync(join(root, name, 'dsh-auto-review-router'), { recursive: true })
-    // 第一行：浅层但已超限的授权（若实现提前 return，深层那条永远轮不到）
-    writeFileSync(file_, [
-      JSON.stringify({ v: 1, dir: root, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'a', at: Date.now(), useCount: 999999 }),
-      JSON.stringify({ v: 1, dir: d, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'b', at: Date.now(), useCount: 0 }),
-    ].join('\n') + '\n')
-    assert.equal(createGrantStore(file_).check(p, 'edit').hit, true, '深层合法授权必须能被找到')
-    ok('MEDIUM-5 超限记录不遮蔽其它合法授权')
-  }
-
-  // ── 同一键多行以最后一行为准 ───────────────────────────────────
-  {
-    const name = 'lastwins'
-    const s = store(name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    s.remember(p, 'edit', evidence)
-    const file_ = grantLedgerPath(join(root, name))
-    writeFileSync(file_, `${readFileSync(file_, 'utf8').trim()}\n${JSON.stringify({ v: 1, dir: d, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'x', at: Date.now() - 40 * 24 * 3600 * 1000, useCount: 0 })}\n`)
-    assert.equal(createGrantStore(file_).check(p, 'edit').hit, false, '最后一行是过期记录 → 不命中')
-    ok('同键多行以最后一行为准')
-  }
-
-  // ── LOW-4 账本伪造矩阵 ─────────────────────────────────────────
-  {
-    const name = 'forged'
-    const d = dir(name)
-    const file_ = grantLedgerPath(join(root, name))
-    mkdirSync(join(root, name, 'dsh-auto-review-router'), { recursive: true })
-    const valid = JSON.stringify({ v: 1, dir: d, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now(), useCount: 0 })
-    writeFileSync(file_, [
-      '{not json',
-      JSON.stringify({ v: 2, dir: d, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: d, opClass: 'delete', tool: 'rm', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: d, opClass: 'Create', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: '..', opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: 'c:', opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: 'c:\\', opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now() }),
-      JSON.stringify({ v: 1, dir: d, opClass: 'edit', tool: 'edit', session: 's', approvalRequestId: 'r', at: Date.now(), useCount: 999999999 }),
-      valid,
-    ].join('\n') + '\n')
-    const list = createGrantStore(file_).list()
-    assert.equal(list.length, 1, `只应保留唯一合法记录（实际 ${JSON.stringify(list.map(g => g.dir))}）`)
-    ok('LOW-4 账本伪造行全部被拒')
-  }
-
-  // ── 落盘失败 fail closed ────────────────────────────────────────
-  {
-    const blocked = file(join(root, 'blocked'), 'not a directory')
-    const s = createGrantStore(join(blocked, 'nested', 'g.jsonl'))
-    const p = file(join(dir('r-fail'), 'a.txt'))
-    assert.equal(s.remember(p, 'edit', evidence).ok, false, '写不进去就不记')
-    assert.equal(s.check(p, 'edit').hit, false, '记不住绝不静默放行')
-    ok('落盘失败 fail closed')
-  }
-
   // ── 证据不全不记 ────────────────────────────────────────────────
   {
     const s = store('evidence')
     const p = file(join(dir('evidence'), 'a.txt'))
-    for (const bad of [{}, { session: 's' }, { session: 's', tool: 'edit' }, { session: '', tool: 'edit', approvalRequestId: 'r' }]) {
+    // 记忆必须能追溯到一次真实的人工放行：tool 与审批请求 id 缺一不可。
+    for (const bad of [{}, { tool: 'edit' }, { approvalRequestId: 'r' }, { tool: '', approvalRequestId: 'r' },
+      { tool: 'edit', approvalRequestId: '' }, null]) {
       assert.equal(s.remember(p, 'edit', bad).ok, false, `证据不全：${JSON.stringify(bad)}`)
     }
-    assert.equal(existsSync(grantLedgerPath(join(root, 'evidence'))), false, '不产生空账本')
+    assert.equal(s.check(p, 'edit').hit, false, '证据不全不得产生授权')
     ok('证据不全一律不记忆')
   }
 
-  // ── clear ───────────────────────────────────────────────────────
+  // ── 内存作用域：clear 立刻生效，且不跨实例泄漏 ───────────────────
   {
-    const s = store('clear')
-    const p = file(join(dir('clear'), 'a.txt'))
-    s.remember(p, 'edit', evidence)
-    assert.equal(s.list().length, 1)
-    assert.equal(s.clear(), true)
-    assert.equal(s.list().length, 0, '清空后无残留授权')
-    assert.equal(s.check(p, 'edit').hit, false)
-    ok('clear 撤销全部授权')
+    const s = store('scope')
+    const d = dir('scope')
+    const p = file(join(d, 'a.txt'))
+    assert.equal(s.remember(p, 'edit', evidence).ok, true)
+    assert.equal(s.check(p, 'edit').hit, true, '授权后免问')
+    assert.equal(s.clear(), true, 'clear 应成功')
+    assert.equal(s.check(p, 'edit').hit, false, 'clear 后立刻重新询问')
+    assert.equal(s.list().length, 0, 'clear 后列表为空')
+    // 另一个实例看不到别人的授权 —— 作用域是本次运行内的单个 store
+    const other = store('scope-other')
+    assert.equal(other.check(p, 'edit').hit, false, '不同实例之间不共享授权')
+    ok('内存作用域：clear 立刻生效、实例间不共享')
   }
 
   // ── N1 HIGH：hardlink 逃逸授权根 ────────────────────────────────
@@ -345,23 +250,6 @@ try {
     }
   } else {
     console.log('SKIP hardlink 用例：文件系统不支持')
-  }
-
-  // ── N2 HIGH：clear() 撤销必须跨重启生效 ─────────────────────────
-  {
-    const name = 'revoke'
-    const s = store(name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    assert.equal(s.remember(p, 'edit', evidence).ok, true)
-    assert.equal(s.check(p, 'edit').hit, true)
-    assert.equal(s.clear(), true, 'clear 应成功')
-    assert.equal(s.check(p, 'edit').hit, false, 'clear 后本进程不再命中')
-    // 关键：模拟重启（新 store 实例）后必须仍然是撤销状态
-    const after = createGrantStore(grantLedgerPath(join(root, name)))
-    assert.equal(after.check(p, 'edit').hit, false, '重启后撤销不得失效')
-    assert.equal(after.list().length, 0, '重启后账本无存活授权')
-    ok('N2 HIGH clear() 撤销跨重启生效')
   }
 
   // ── N4/N5：preview 与 remember/check 同源 ───────────────────────
@@ -409,54 +297,12 @@ try {
     ok('N3 敏感段与系统目录覆盖完整')
   }
 
-  // ── N8：账本行数有界（压实）─────────────────────────────────────
-  {
-    const name = 'compact'
-    const s = createGrantStore(grantLedgerPath(join(root, name)), { maxLedgerLines: 20, maxUseCount: 1000 })
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    s.remember(p, 'edit', evidence)
-    for (let i = 0; i < 200; i += 1) s.check(p, 'edit')
-    const lines = readFileSync(grantLedgerPath(join(root, name)), 'utf8').trim().split('\n').filter(Boolean)
-    assert.ok(lines.length <= 40, `账本行数必须有界（实际 ${lines.length}）`)
-    assert.equal(s.check(p, 'edit').hit, true, '压实后授权仍有效')
-    // 重启后要用同一组上限，否则 200 次已超过默认 100 次上限（那是正确行为，不是缺陷）
-    const reopened = createGrantStore(grantLedgerPath(join(root, name)), { maxLedgerLines: 20, maxUseCount: 1000 })
-    assert.equal(reopened.check(p, 'edit').hit, true, '压实后重启仍有效')
-    const counted = reopened.check(p, 'edit')
-    assert.equal(counted.hit, true)
-    // 超过 1000 次上限后应停止命中（默认上限下的行为另测）
-    for (let i = 0; i < 1000; i += 1) reopened.check(p, 'edit')
-    assert.equal(reopened.check(p, 'edit').hit, false, '超过次数上限应停止免问')
-    ok('N8 账本行数有界（压实），重启后计数延续')
-  }
-
   // ── N10：isInside 大小写归一 ────────────────────────────────────
   {
     assert.equal(isInside('D:\\PROJ\\x', 'd:\\proj'), true, '大小写不同仍应判定为在内')
     assert.equal(isInside('d:\\proj', 'D:\\PROJ'), true)
     assert.equal(isInside('d:\\proj2\\x', 'd:\\proj'), false, '前缀相同但不同目录不得误判')
     ok('N10 isInside 大小写归一')
-  }
-
-  // ── 第三轮 HIGH-2：compact() 不得抹掉触发压实的那条授权 ─────────
-  {
-    const name = 'compact-edge'
-    const ledger = grantLedgerPath(join(root, name))
-    // 上界设成 3，让第 3 条 remember 正好触发压实
-    const s = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
-    const d = dir(name)
-    for (let i = 0; i < 3; i += 1) {
-      const p = file(join(d, `f${i}.txt`))
-      assert.equal(s.remember(p, 'edit', evidence).ok, true, `第 ${i + 1} 条授权应写入`)
-    }
-    // 三条都必须跨重启存活 —— 压实不得吃掉触发它的最后一条
-    const reopened = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
-    for (let i = 0; i < 3; i += 1) {
-      const p = join(d, `f${i}.txt`)
-      assert.equal(reopened.check(p, 'edit').hit, true, `第 ${i + 1} 条授权在压实后必须存活`)
-    }
-    ok('第三轮 HIGH-2 compact() 不丢触发压实的那条授权')
   }
 
   // ── 第三轮 MEDIUM-3：单段也必须查敏感表 ─────────────────────────
@@ -488,170 +334,6 @@ try {
     }
     assert.equal(s.check(okFile, 'edit').hit, true)
     ok('第三轮 MEDIUM-4 凭据文件名纳入保护')
-  }
-
-  // ── 第三轮 MEDIUM-5：时钟回拨不得让墓碑永久压死新授权 ───────────
-  {
-    const name = 'clock'
-    const ledger = grantLedgerPath(join(root, name))
-    const first = createGrantStore(ledger)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    assert.equal(first.remember(p, 'edit', evidence).ok, true)
-    assert.equal(first.clear(), true)
-    // 模拟时钟回拨：把「现在」设到墓碑之前
-    const realNow = Date.now
-    const tombstoneAt = realNow()
-    Date.now = () => tombstoneAt - 60_000
-    try {
-      const rewound = createGrantStore(ledger)
-      assert.equal(rewound.clear(), false || true)   // 再次 clear 也应成功
-      const revived = createGrantStore(ledger)
-      // 重新授权必须真的写进去，且跨重启存活
-      const r = revived.remember(p, 'edit', evidence)
-      assert.equal(r.ok, true, '时钟回拨后重新授权必须成功')
-      const after = createGrantStore(ledger)
-      assert.equal(after.check(p, 'edit').hit, true, '时钟回拨下的新授权必须跨重启存活')
-    } finally {
-      Date.now = realNow
-    }
-    ok('第三轮 MEDIUM-5 时钟回拨不压死新授权')
-  }
-
-  // ── 第三轮 LOW-2：两个 store 实例共享一份账本，不得互相抹掉 ───────
-  {
-    const name = 'multi-instance'
-    const ledger = grantLedgerPath(join(root, name))
-    // 上界 3：store2 的第 3 条会触发 compact()，正好是丢更新的时机
-    const store1 = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
-    const store2 = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
-    const d1 = dir(`${name}-a`)
-    const d2 = dir(`${name}-b`)
-    const p1 = file(join(d1, 'a.txt'))
-    const p2 = file(join(d2, 'b.txt'))
-    // 交替授权：两个实例各写两条，store2 最后一条触发压实
-    assert.equal(store1.remember(p1, 'edit', evidence).ok, true, 'store1 第 1 条')
-    assert.equal(store2.remember(p2, 'edit', evidence).ok, true, 'store2 第 1 条')
-    assert.equal(store1.remember(p1, 'create', evidence).ok, true, 'store1 第 2 条（不同 opClass）')
-    assert.equal(store2.remember(p2, 'create', evidence).ok, true, 'store2 第 2 条 → 触发压实')
-    // store1 写的授权不得被 store2 的压实抹掉
-    assert.equal(store1.check(p1, 'edit').hit, true, 'store1 的授权必须仍在')
-    assert.equal(store2.check(p2, 'edit').hit, true, 'store2 的授权必须仍在')
-    // 跨「重启」验证：磁盘上的内容必须完整
-    const reopened = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
-    assert.equal(reopened.check(p1, 'edit').hit, true, '重启后 store1 的授权仍在')
-    assert.equal(reopened.check(p2, 'edit').hit, true, '重启后 store2 的授权仍在')
-    assert.equal(reopened.check(p1, 'create').hit, true, '重启后 store1 的 create 授权仍在')
-    assert.equal(reopened.check(p2, 'create').hit, true, '重启后 store2 的 create 授权仍在')
-    ok('第三轮 LOW-2 多实例压实不丢对方的授权')
-  }
-
-  // ── 端到端：首次询问 → 放行 → 免问 → 敏感仍问 → 重启 → 撤销 ────
-  // 前面各组都是单点验证；这一组按用户真实遇到的顺序串一遍，
-  // 防止「每一步都对但串起来不对」（跨组状态残留、顺序依赖）。
-  {
-    const name = 'e2e'
-    const profile = join(root, name)
-    const d = dir(`${name}-proj`)
-    const main = file(join(d, 'app.js'))
-    const s = createGrantStore(grantLedgerPath(profile))
-    const ev = { session: 'e2e', tool: 'edit', approvalRequestId: 'e2e-req' }
-
-    // 1. 首次：会询问，文案承诺的范围要具体到目录
-    assert.equal(s.check(main, 'edit').hit, false, '首次必须询问')
-    const first = s.preview(main, 'edit')
-    assert.equal(first.grantable, true, '普通目标可授权')
-    assert.equal(first.dirPath, join(d), `preview 必须给出磁盘真实路径（实际 ${first.dirPath}）`)
-
-    // 2. 放行
-    assert.equal(s.remember(main, 'edit', ev).ok, true, '放行应写入')
-
-    // 3. 同目录其它文件免问
-    const other = file(join(d, 'other.js'))
-    assert.equal(s.check(other, 'edit').hit, true, '同目录其它文件免问')
-
-    // 4. 敏感文件仍每次问
-    for (const name_ of ['.env', 'id_rsa', '.npmrc']) {
-      const p = file(join(d, name_))
-      const r = s.check(p, 'edit')
-      assert.equal(r.hit, false, `${name_} 仍须每次询问（实际 ${JSON.stringify(r)}）`)
-      assert.equal(r.reason, 'protected-path', `${name_} 应报 protected-path`)
-    }
-
-    // 5. 目录外不记忆
-    const outside = file(join(dir(`${name}-outside`), 'x.js'))
-    assert.equal(s.check(outside, 'edit').hit, false, '目录外不记忆')
-
-    // 6. 重启后仍免问
-    const reopened = createGrantStore(grantLedgerPath(profile))
-    assert.equal(reopened.check(main, 'edit').hit, true, '跨重启免问')
-    assert.equal(reopened.check(outside, 'edit').hit, false, '跨重启后目录外仍不记忆')
-
-    // 7. 撤销后重新询问（跨重启）
-    assert.equal(reopened.clear(), true)
-    const afterRevoke = createGrantStore(grantLedgerPath(profile))
-    assert.equal(afterRevoke.check(main, 'edit').hit, false, '撤销后重新询问')
-    assert.equal(afterRevoke.check(other, 'edit').hit, false, '撤销后同目录其它文件也重新询问')
-
-    // 8. 账本结构：授权行 + 计数行 + 墓碑
-    const rows = readFileSync(grantLedgerPath(profile), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
-    assert.ok(rows.some(row => row.epoch !== undefined), '必须留下撤销墓碑')
-    assert.ok(rows.filter(row => row.epoch === undefined).every(row => row.dir === canonicalPathKey(join(d))),
-      '授权行的 dir 必须是归一化键')
-    ok('端到端：询问 → 放行 → 免问 → 敏感仍问 → 重启 → 撤销')
-  }
-
-  // ── 第四轮 NEW-1 [HIGH]：时钟回拨后 clear() 静默失效 ────────────
-  // 此前只测了「先回拨 → 再 remember」这一个顺序（MEDIUM-5），
-  // 于是漏掉了「先授权 → 再回拨 → 再 clear」——墓碑比已有授权还早，
-  // load() 的 `at > clearedAt` 滤不掉，撤销返回 true 却什么都没撤销。
-  // 这是第二轮 N2（撤销复活）的再犯。
-  {
-    for (const [label, offset] of [['1 秒', 1000], ['1 小时', 3600_000], ['1 天', 86400_000]]) {
-      const name = `new1-${label.replace(/\s/g, '')}`
-      const profile = join(root, name)
-      const d = dir(name)
-      const p = file(join(d, 'a.txt'))
-      const s = createGrantStore(grantLedgerPath(profile))
-      assert.equal(s.remember(p, 'edit', evidence).ok, true, `${label}：前置授权应写入`)
-      const realNow = Date.now
-      const base = realNow()
-      Date.now = () => base - offset
-      let cleared
-      let afterRestart
-      try {
-        cleared = s.clear()
-        afterRestart = createGrantStore(grantLedgerPath(profile)).check(p, 'edit')
-      } finally { Date.now = realNow }
-      assert.equal(cleared, true, `${label}：clear 应返回成功`)
-      assert.equal(afterRestart.hit, false,
-        `${label} 回拨后撤销必须跨重启生效（实际 ${JSON.stringify(afterRestart)}）`)
-    }
-    ok('第四轮 NEW-1 [HIGH] 时钟回拨后 clear() 不再静默失效')
-  }
-
-  // 第四轮复核要求换一个未测过的顺序：clear / 回拨 / remember 多轮交替。
-  // 每一轮都必须保持「刚授权的能命中、撤销后立刻不命中」。
-  {
-    const name = 'new1-alternating'
-    const profile = join(root, name)
-    const d = dir(name)
-    const p = file(join(d, 'a.txt'))
-    const realNow = Date.now
-    const base = realNow()
-    try {
-      for (let round = 1; round <= 6; round += 1) {
-        // 时钟在每轮之间回拨，且回拨量递增
-        Date.now = () => base - round * 60_000
-        const s = createGrantStore(grantLedgerPath(profile))
-        assert.equal(s.remember(p, 'edit', evidence).ok, true, `第 ${round} 轮：授权应写入`)
-        assert.equal(s.check(p, 'edit').hit, true, `第 ${round} 轮：刚授权必须命中`)
-        assert.equal(s.clear(), true, `第 ${round} 轮：clear 应成功`)
-        const reopened = createGrantStore(grantLedgerPath(profile))
-        assert.equal(reopened.check(p, 'edit').hit, false, `第 ${round} 轮：撤销必须跨重启生效`)
-      }
-    } finally { Date.now = realNow }
-    ok('第四轮 clear/回拨/remember 六轮交替，每轮撤销都跨重启生效')
   }
 
   console.log(`grant-store: ${passed} 组场景通过`)
