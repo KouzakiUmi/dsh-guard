@@ -36,6 +36,7 @@ const REQUIRED_FILES = {
 		"lib/policy.js",
 		"lib/context.js",
 		"lib/approval-history.js",
+		"lib/grant-store.js",
 	],
 };
 
