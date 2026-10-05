@@ -109,12 +109,21 @@ try {
       const sub = join(base, seg); mkdirSync(sub, { recursive: true })
       assert.equal(s.remember(file(join(sub, 'config')), 'edit', evidence).ok, false, `${seg} 目录不可授权`)
     }
+    // 2026-10-05 第三轮复核（MEDIUM-1）：直接以 .env 为目标授权时**不得**成立。
+    // 旧行为是「记住该目录 → 同目录其它文件从此免问」，而弹窗写的是
+    // 「本次决定仅对这一次调用生效，不会被记住」——文案与实现反向分叉。
+    // 现在 preview 与 remember 共用 evaluate()，两边都拒绝。
     const env = file(join(base, 'x.env'), 'k=v')
-    assert.equal(s.remember(env, 'edit', evidence).ok, true, '含 .env 的目录可授权')
+    assert.equal(s.preview(env, 'edit').grantable, false, '.env 目标不得承诺可授权')
+    assert.equal(s.remember(env, 'edit', evidence).ok, false, '.env 目标不得被记住')
     assert.equal(s.check(env, 'edit').hit, false, '写 .env 仍每次重问')
-    assert.equal(s.check(file(join(base, 'ok.txt')), 'edit').hit, true, '同目录普通文件免问')
+    // 目录里恰好有 .env 时，授权该目录仍可（.env 本身由 isProtectedTarget 兜住）
+    const other = file(join(base, 'ok.txt'))
+    assert.equal(s.remember(other, 'edit', evidence).ok, true, '普通目标可授权')
+    assert.equal(s.check(env, 'edit').hit, false, '写 .env 仍每次重问')
+    assert.equal(s.check(other, 'edit').hit, true, '同目录普通文件免问')
     assert.equal(isProtectedTarget(env.toLowerCase(), base.toLowerCase()), true)
-    ok('R2 敏感文件不受记忆抑制')
+    ok('R2 敏感文件不受记忆抑制，且 .env 目标不可授权（MEDIUM-1）')
   }
 
   // ── R3 删除类 / shell / move 永不记忆（MEDIUM-3）─────────────────
@@ -428,6 +437,85 @@ try {
     assert.equal(isInside('d:\\proj', 'D:\\PROJ'), true)
     assert.equal(isInside('d:\\proj2\\x', 'd:\\proj'), false, '前缀相同但不同目录不得误判')
     ok('N10 isInside 大小写归一')
+  }
+
+  // ── 第三轮 HIGH-2：compact() 不得抹掉触发压实的那条授权 ─────────
+  {
+    const name = 'compact-edge'
+    const ledger = grantLedgerPath(join(root, name))
+    // 上界设成 3，让第 3 条 remember 正好触发压实
+    const s = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
+    const d = dir(name)
+    for (let i = 0; i < 3; i += 1) {
+      const p = file(join(d, `f${i}.txt`))
+      assert.equal(s.remember(p, 'edit', evidence).ok, true, `第 ${i + 1} 条授权应写入`)
+    }
+    // 三条都必须跨重启存活 —— 压实不得吃掉触发它的最后一条
+    const reopened = createGrantStore(ledger, { maxLedgerLines: 3, maxUseCount: 1000 })
+    for (let i = 0; i < 3; i += 1) {
+      const p = join(d, `f${i}.txt`)
+      assert.equal(reopened.check(p, 'edit').hit, true, `第 ${i + 1} 条授权在压实后必须存活`)
+    }
+    ok('第三轮 HIGH-2 compact() 不丢触发压实的那条授权')
+  }
+
+  // ── 第三轮 MEDIUM-3：单段也必须查敏感表 ─────────────────────────
+  {
+    for (const p of ['c:\\inetpub', 'c:\\secrets', 'c:\\recovery', 'c:\\sysvol', 'c:\\appdata', 'd:\\secrets', 'd:\\keys']) {
+      assert.equal(isTooBroadRoot(p), true, `单段 ${p} 不可授权`)
+    }
+    // 反向：正常项目根仍可授权
+    for (const p of ['d:\\proj', 'd:\\proj\\app', 'd:\\dsh-guard\\packages']) {
+      assert.equal(isTooBroadRoot(p), false, `正常项目根 ${p} 应可授权`)
+    }
+    ok('第三轮 MEDIUM-3 单段路径也查敏感表')
+  }
+
+  // ── 第三轮 MEDIUM-4：凭据文件名纳入保护 ─────────────────────────
+  {
+    const s = store('cred')
+    const d = dir('cred')
+    for (const name of ['.npmrc', 'id_rsa', 'credentials.json', 'service-account.json', '.pypirc', '.git-credentials']) {
+      const p = file(join(d, name), 'x')
+      assert.equal(s.preview(p, 'edit').grantable, false, `${name} 不得可授权`)
+      assert.equal(s.remember(p, 'edit', evidence).ok, false, `${name} 不得被记住`)
+    }
+    // 目录被授权后，这些文件在 check 侧也要每次重问
+    const okFile = file(join(d, 'main.js'))
+    assert.equal(s.remember(okFile, 'edit', evidence).ok, true)
+    for (const name of ['.npmrc', 'id_rsa']) {
+      assert.equal(s.check(file(join(d, name)), 'edit').hit, false, `${name} 在已授权目录内仍须重问`)
+    }
+    assert.equal(s.check(okFile, 'edit').hit, true)
+    ok('第三轮 MEDIUM-4 凭据文件名纳入保护')
+  }
+
+  // ── 第三轮 MEDIUM-5：时钟回拨不得让墓碑永久压死新授权 ───────────
+  {
+    const name = 'clock'
+    const ledger = grantLedgerPath(join(root, name))
+    const first = createGrantStore(ledger)
+    const d = dir(name)
+    const p = file(join(d, 'a.txt'))
+    assert.equal(first.remember(p, 'edit', evidence).ok, true)
+    assert.equal(first.clear(), true)
+    // 模拟时钟回拨：把「现在」设到墓碑之前
+    const realNow = Date.now
+    const tombstoneAt = realNow()
+    Date.now = () => tombstoneAt - 60_000
+    try {
+      const rewound = createGrantStore(ledger)
+      assert.equal(rewound.clear(), false || true)   // 再次 clear 也应成功
+      const revived = createGrantStore(ledger)
+      // 重新授权必须真的写进去，且跨重启存活
+      const r = revived.remember(p, 'edit', evidence)
+      assert.equal(r.ok, true, '时钟回拨后重新授权必须成功')
+      const after = createGrantStore(ledger)
+      assert.equal(after.check(p, 'edit').hit, true, '时钟回拨下的新授权必须跨重启存活')
+    } finally {
+      Date.now = realNow
+    }
+    ok('第三轮 MEDIUM-5 时钟回拨不压死新授权')
   }
 
   console.log(`grant-store: ${passed} 组场景通过`)

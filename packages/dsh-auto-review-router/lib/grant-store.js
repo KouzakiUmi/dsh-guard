@@ -29,7 +29,7 @@
  * R10 使用次数或时效超限 → 重新问一次
  */
 
-import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 
 /** 与 dsh-audit-rollback 的 canonicalPathKey 同口径：win32 下小写归一。 */
@@ -129,10 +129,8 @@ function volumeOf(key) {
  * 永远不记忆的目标：敏感目录与过宽的根。
  * Codex 对这些路径是硬性只读保护，DSH 没有等价表达，只能靠重新问近似（R2/R8）。
  */
-const PROTECTED_SEGMENTS = new Set(['.git', '.codex', '.agents', '.ssh', '.gnupg'])
 const NEVER_GRANT_ROOTS = new Set(['c:\\', 'c:\\users', 'c:\\windows', 'c:\\program files', 'c:\\program files (x86)',
   'c:\\programdata', 'c:\\users\\public'])
-const SYSTEM_DIR_NAMES = new Set(['windows', 'program files', 'program files (x86)', 'programdata', 'system32', 'users', '$recycle.bin'])
 
 /**
  * 匹配时用：目标相对已授权根的路径里是否含受保护段（.git/.env 等）。
@@ -142,10 +140,41 @@ function isProtectedTarget(dirKey, rootKey) {
   const relative = dirKey.slice(rootKey.length).replace(/^[\\/]+/, '')
   if (!relative) return false
   for (const segment of relative.split(/[\\/]+/)) {
-    if (PROTECTED_SEGMENTS.has(segment.toLowerCase())) return true
+    const lower = segment.toLowerCase()
+    if (PROTECTED_SEGMENTS.has(lower) || PROTECTED_FILE_NAMES.has(lower)) return true
   }
   return /\.env$/i.test(relative) || /(^|[\\/])\.env\.[^\\/]+$/i.test(relative)
 }
+
+/**
+ * 路径级受保护段：出现在**授权路径任意一层**即拒绝。
+ * 2026-10-05 第三轮复核实证（MEDIUM-4）：此前这里只有 5 项，凭据**文件名**
+ * （.npmrc / id_rsa / credentials / service-account.json …）完全没纳入 ——
+ * 普通项目目录一旦被授权，这些文件的写入就免问。SENSITIVE_SEGMENTS 只被
+ * isTooBroadRoot（根级判定）使用，管不到路径级。
+ */
+const PROTECTED_SEGMENTS = new Set([
+  // 版本控制与 agent 状态目录
+  '.git', '.codex', '.agents', '.ssh', '.gnupg',
+  // DSH 自身状态与记忆
+  '.dsh', '.dsh-memory',
+  // 包管理器配置（内含 registry 凭据）
+  '.npm', '.yarn', '.cargo', '.gem', '.composer', '.m2', '.gradle', '.nuget',
+  // 云与容器凭据
+  '.aws', '.azure', '.kube', '.docker', '.config', '.password-store', '.keyring', '.vault',
+  // 其它 agent 的配置目录
+  '.claude', '.gemini', '.cursor', '.copilot',
+  // 凭据/密钥目录名
+  'secrets', '.secrets', 'credentials', '.credentials', 'keys', '.keys',
+])
+
+/** 凭据类**文件名**：出现在路径任一层即拒绝。 */
+const PROTECTED_FILE_NAMES = new Set([
+  '.npmrc', '.pypirc', '.netrc', '_netrc', '.git-credentials', '.dockercfg',
+  'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+  'credentials', 'credentials.json', 'service-account.json', 'serviceaccount.json',
+  'htpasswd', '.htpasswd', '.pgpass', 'my.cnf', 'saml.json', 'local.settings.json',
+])
 
 /**
  * 授权目录自身是否不可授权：路径里含受保护段，或末段形如 .env*。
@@ -156,7 +185,9 @@ function isProtectedTarget(dirKey, rootKey) {
 function isSelfProtected(dirKey) {
   const root = parse(dirKey).root
   for (const segment of dirKey.slice(root.length).split(/[\\/]+/)) {
-    if (segment !== '' && PROTECTED_SEGMENTS.has(segment.toLowerCase())) return true
+    if (segment === '') continue
+    const lower = segment.toLowerCase()
+    if (PROTECTED_SEGMENTS.has(lower) || PROTECTED_FILE_NAMES.has(lower)) return true
   }
   return /\.env$/i.test(dirKey) || /(^|[\\/])\.env\.[^\\/]+$/i.test(dirKey)
 }
@@ -170,14 +201,14 @@ function isTooBroadRoot(dirKey) {
   const root = parse(dirKey).root
   const segments = dirKey.slice(root.length).split(/[\\/]+/).filter(part => part !== '')
   if (segments.length === 0) return true                                     // 盘根本身
-  if (segments.length === 1) return SYSTEM_DIR_NAMES.has(segments[0].toLowerCase())  // C:\Users、C:\Windows
-  // C:\Users\<name> 是用户 profile 根：授权它等于授权整个用户目录。
-  if (segments.length === 2 && segments[0].toLowerCase() === 'users') return true
-  // 其余交给敏感段判定：正常项目根（D:\dsh-guard、D:\work\app）不应被连坐。
   const lower = segments.map(part => part.toLowerCase())
+  // 2026-10-05 第三轮复核实证（MEDIUM-3）：单段早退让 `C:\inetpub`、`C:\secrets`、
+  // `C:\recovery` 走不到敏感段循环，整张表被绕过。改为单段也要查表。
   for (const sensitive of SENSITIVE_SEGMENTS) {
     if (lower.includes(sensitive)) return true
   }
+  // C:\Users\<name> 是用户 profile 根：授权它等于授权整个用户目录。
+  if (lower[0] === 'users' && lower.length >= 2) return true
   return false
 }
 
@@ -408,6 +439,32 @@ export function createGrantStore(filePath, options = {}) {
    * 记住一次人工放行（R6：只由用户显式放行触发）。落盘失败返回 false，
    * 调用方据此继续走「再问一次」——记不住就问，绝不静默放行。
    */
+  /**
+   * 授权判定的唯一实现。preview()（给审批文案）与 remember()（真正落盘）都走这里，
+   * 结构上杜绝「文案说一套、写入做另一套」。
+   *
+   * @returns {{ grantable: true, dir: string, opClass: string } | { grantable: false, reason: string }}
+   */
+  function evaluate(targetPath, opClass) {
+    if (!GRANTABLE_OPS.has(opClass)) return { grantable: false, reason: 'not-grantable-op' }
+    const leaf = verifyLeaf(targetPath)
+    if (!leaf.ok) return { grantable: false, reason: leaf.reason }
+    const verified = verifyAncestors(targetPath)
+    if (!verified.ok) return { grantable: false, reason: verified.reason }
+    if (isTooBroadRoot(verified.dirKey)) return { grantable: false, reason: 'root-too-broad' }
+    if (isSelfProtected(verified.dirKey)) return { grantable: false, reason: 'protected-path' }
+    // 2026-10-05 第三轮复核实证（MEDIUM-1）：此前 preview 多做一次全路径判定
+    // （能抓住 .env 这类文件名），而 remember 只判目录键 —— 方向相反地分叉：
+    // 弹窗说「本次决定仅对这一次调用生效，不会被记住」，点放行后却把该目录
+    // 写进授权，同目录**其它**文件从此免问且跨重启有效。
+    // 授权粒度是目录，所以 .env 本身每次仍会问（check 的 isProtectedTarget 负责），
+    // 但目录授权本身应当建立 —— 关键是两边必须一致。
+    if (isSelfProtected(canonicalPathKey(canonicalize(targetPath)))) {
+      return { grantable: false, reason: 'protected-path' }
+    }
+    return { grantable: true, dir: verified.dirKey, opClass }
+  }
+
   function remember(rawPath, opClass, evidence) {
     if (!writable) return { ok: false, reason: 'store-unwritable' }
     if (typeof rawPath !== 'string' || rawPath === '') return { ok: false, reason: 'no-path' }
@@ -416,15 +473,10 @@ export function createGrantStore(filePath, options = {}) {
     const { session, tool, approvalRequestId } = evidence
     if (typeof session !== 'string' || session === '' || typeof tool !== 'string' || tool === ''
       || typeof approvalRequestId !== 'string' || approvalRequestId === '') return { ok: false, reason: 'bad-evidence' }
-    const leaf = verifyLeaf(rawPath)
-    if (!leaf.ok) return { ok: false, reason: leaf.reason }
-    const verified = verifyAncestors(rawPath)
-    if (!verified.ok) return { ok: false, reason: verified.reason }
-    const dirKey = verified.dirKey
-    if (isTooBroadRoot(dirKey)) return { ok: false, reason: 'root-too-broad' }
-    // 授权的是**目录**，所以只判目录自身的路径里有没有受保护段；
-    // 目录里恰好存在 .env/.git 属于 check 时 isProtectedTarget 的职责（每次重问）。
-    if (isSelfProtected(dirKey)) return { ok: false, reason: 'protected-path' }
+    // 走与 preview 同一份判定（见 evaluate 的 MEDIUM-1 说明）。
+    const verdict = evaluate(rawPath, opClass)
+    if (!verdict.grantable) return { ok: false, reason: verdict.reason }
+    const dirKey = verdict.dir
     const current = load()
     const existing = current.find(grant => grant.dir === dirKey && grant.opClass === opClass)
     // MEDIUM-6：已过期/已超限的旧记录必须允许重新写行复活，否则用户重新批准
@@ -432,18 +484,29 @@ export function createGrantStore(filePath, options = {}) {
     if (existing && Date.now() - existing.at <= maxAgeMs && existing.useCount < maxUseCount) {
       return { ok: true, reason: 'already' }
     }
-    const grant = { v: 1, dir: dirKey, opClass, tool, session, approvalRequestId, at: Date.now(), useCount: 0 }
+    // 2026-10-05 第三轮复核实证（MEDIUM-5）：系统时钟回拨（NTP 阶跃、虚拟机快照
+    // 恢复、手改日期）会让新的 at 落到旧墓碑之前，重启后被 `at <= clearedAt` 全部滤掉 ——
+    // 静默、永久，直到时钟追上来。这里钳制 at 严格大于 clearedAt，
+    // 让「刚重新授权」永远不会被同一进程自己写的墓碑压死。
+    const at = Math.max(Date.now(), clearedAt + 1)
+    const grant = { v: 1, dir: dirKey, opClass, tool, session, approvalRequestId, at, useCount: 0 }
+    // 先并入内存缓存，再决定是否落盘。
+    // 2026-10-05 第三轮复核实证（HIGH-2）：原顺序是 append → compact → push，
+    // 而 compact() 从**陈旧内存缓存**重写整个文件 —— 刚 append 的那行当场被抹掉，
+    // remember() 却仍返回 {ok:true, reason:'stored'}，UI 已承诺「记住 30 天」。
+    // 生产默认第 512 行附近开始，每 512 行静默丢一条授权。
+    current.push(grant)
+    if (current.length > maxGrants) current.splice(0, current.length - maxGrants)
     try {
       mkdirSync(dirname(filePath), { recursive: true })
       appendFileSync(filePath, `${JSON.stringify(grant)}\n`, 'utf8')
     } catch {
       writable = false
+      current.pop()            // 落盘失败则不进缓存，保持内存与磁盘一致
       return { ok: false, reason: 'write-failed' }
     }
     linesWritten += 1
     if (linesWritten >= maxLedgerLines) compact()
-    current.push(grant)
-    if (current.length > maxGrants) current.splice(0, current.length - maxGrants)
     return { ok: true, reason: 'stored' }
   }
 
@@ -465,17 +528,28 @@ export function createGrantStore(filePath, options = {}) {
     if (linesWritten >= maxLedgerLines) compact()
   }
 
-  /** 重写账本：只保留当前有效授权 + 撤销墓碑。 */
+  /**
+   * 重写账本：只保留当前有效授权 + 撤销墓碑。
+   *
+   * 2026-10-05 第三轮复核实证（LOW-1）：此前用 writeFileSync 原地截断重写，
+   * 一旦在截断后失败，账本里**全部**授权一次性丢失，而注释却写「不影响正确性」——
+   * 方向虽 fail-closed（重新问人），但数据损失无上界。
+   * 现在改为「写临时文件 → rename 覆盖」，rename 在同一卷内是原子的：
+   * 要么整份换成功，要么完全保持旧内容，不会出现半截账本。
+   */
   function compact() {
     const live = load()
     const body = live.map(grant => JSON.stringify(grant)).join('\n')
     const header = clearedAt > 0 ? `${JSON.stringify({ v: 1, epoch: clearedAt })}\n` : ''
     const next = header + (body ? `${body}\n` : '')
+    const tmp = `${filePath}.compact`
     try {
-      writeFileSync(filePath, next, 'utf8')
+      writeFileSync(tmp, next, 'utf8')
+      renameSync(tmp, filePath)
       linesWritten = header === '' ? live.length : live.length + 1
     } catch {
-      // 压实失败：继续 append 语义，不影响正确性（只是文件会长）。
+      // 压实失败：旧账本原封不动，继续 append 语义。
+      try { unlinkSync(tmp) } catch { /* 临时文件残留无害 */ }
     }
   }
 
@@ -483,27 +557,14 @@ export function createGrantStore(filePath, options = {}) {
     check,
     remember,
     /**
-     * 这次调用**会不会**被记忆吸收。remember() 与调用方的审批文案必须都走这里。
-     *
-     * 2026-10-05 复核实证（N4/N5）：文案此前在 index.js 里独立重算判定，与
-     * remember/check 不同源 —— delete 类文案说「会记住」而 remember 必然返回
-     * not-grantable-op；.env 目标文案说「30 天免问」而 check 恒返回 protected-path。
-     * HIGH-4 要求文案与实际授予严格一致，所以判定必须只有一份实现。
+     * 这次调用**会不会**被记忆吸收。与 remember() 共用 evaluate()，
+     * 审批文案据此如实告知用户「会记住什么 / 只对本次生效」。
      *
      * @returns {{ grantable: true, dir: string, opClass: string } | { grantable: false, reason: string }}
      */
     preview(targetPath, opClass) {
-      if (!GRANTABLE_OPS.has(opClass)) return { grantable: false, reason: 'not-grantable-op' }
-      const leaf = verifyLeaf(targetPath)
-      if (!leaf.ok) return { grantable: false, reason: leaf.reason }
-      const verified = verifyAncestors(targetPath)
-      if (!verified.ok) return { grantable: false, reason: verified.reason }
-      if (isTooBroadRoot(verified.dirKey)) return { grantable: false, reason: 'root-too-broad' }
-      if (isSelfProtected(verified.dirKey)) return { grantable: false, reason: 'protected-path' }
-      // 目录内已存在 .git/.env 之类：目录可授权，但这些文件每次仍会问。
-      // 文案必须如实反映：只承诺「不含敏感路径」。
-      if (isSelfProtected(canonicalPathKey(canonicalize(targetPath)))) return { grantable: false, reason: 'protected-path' }
-      return { grantable: true, dir: verified.dirKey, opClass }
+      if (typeof targetPath !== 'string' || targetPath === '') return { grantable: false, reason: 'no-path' }
+      return evaluate(targetPath, opClass)
     },
     list() { return load().map(grant => ({ ...grant })) },
     /**

@@ -245,6 +245,54 @@ try {
   // turn1 在不存在的目录下建文件、turn2 编辑它 → before.existed=false 却拿
   // turn2 的 after 相比，changeType 报 created、action 说「撤回创建」，
   // restore 真把含最新内容的文件删掉。必须拒绝并报 CREATED_IN_EARLIER_TURN。
+  // 2026-10-05 第三轮复核实证（第三轮 HIGH-1）：N9 判据挂在 beforeBaselineEmpty
+  //（要求 guards 为空）上，只覆盖了「新建目录」；**在已存在目录里新建文件**
+  // 时 probeFile 返回完整非空 guards，判据根本不触发 ——
+  // changeType 报 created、action 说「撤回创建」、nonce 已签发，
+  // restore 真把含两轮后续工作的文件删掉。第三轮实测三轮编辑，文件被删。
+  await test('MEDIUM-7b cross-turn create with EXISTING parent dir', async () => {
+    const dir = join(root, 'medium7b'); mkdirSync(dir)
+    const stateDir = join(dir, 'state'); initState(stateDir)
+    const sessionId = 'medium7b-session'
+    // 关键：父目录**预先存在** → probeFile 返回完整 guards 链（非空）
+    const parent = join(dir, 'existing'); mkdirSync(parent, { recursive: true })
+    const file = join(parent, 'a.txt')
+
+    appendEntry(stateDir, { kind: 'turn/start', session: sessionId, turn: 1, cwd: dir })
+    const ts1 = createTurnState()
+    appendEntry(stateDir, { kind: 'call', session: sessionId, turn: 1, tool: 'write', callId: 'c1', targets: [file] })
+    const b1 = capturePath(stateDir, { session: sessionId, turn: 1, path: file, phase: 'before', tool: 'write', callId: 'c1', maxBytes: 65536, turnState: ts1 })
+    assert.equal(b1.existed, false, 'before 声称文件原本不存在')
+    assert.ok(Array.isArray(b1.guards) && b1.guards.length > 0,
+      `祖先齐全时 guards 必须非空（这是第三轮 HIGH-1 的触发条件），实际 ${b1.guards.length}`)
+    writeFileSync(file, 'v1')
+    capturePath(stateDir, { session: sessionId, turn: 1, path: file, phase: 'after', maxBytes: 65536, turnState: ts1 })
+    appendEntry(stateDir, { kind: 'turn/end', session: sessionId, turn: 1, captured: 1 })
+
+    for (const [turn, content] of [[2, 'v2-EDITED-WORK'], [3, 'v3-LATEST-WORK']]) {
+      appendEntry(stateDir, { kind: 'turn/start', session: sessionId, turn, cwd: dir })
+      const ts = createTurnState()
+      appendEntry(stateDir, { kind: 'call', session: sessionId, turn, tool: 'edit', callId: `c${turn}`, targets: [file] })
+      capturePath(stateDir, { session: sessionId, turn, path: file, phase: 'before', tool: 'edit', callId: `c${turn}`, maxBytes: 65536, turnState: ts })
+      writeFileSync(file, content)
+      capturePath(stateDir, { session: sessionId, turn, path: file, phase: 'after', maxBytes: 65536, turnState: ts })
+      appendEntry(stateDir, { kind: 'turn/end', session: sessionId, turn, captured: 1 })
+    }
+
+    const api = createRollbackApi(stateDir, permissive)
+    const { rows } = await api.changedFiles({ sessionId })
+    const row = rows.find(r => r.path === file)
+    assert.ok(row, '该文件必须出现在列表里')
+    assert.equal(row.canRestore, false, `父目录已存在时的跨轮创建不得可回滚（实际 reason=${row.reason}）`)
+    assert.equal(row.reason, 'CREATED_IN_EARLIER_TURN', `应报 CREATED_IN_EARLIER_TURN（实际 ${row.reason}）`)
+    assert.equal(row.changeType, 'modified', 'changeType 应为 modified 而非 created')
+    const previewView = await api.preview({ sessionId, entryId: row.entryId })
+    assert.equal(previewView.nonce, null, '不得签发预览票据')
+    assert.equal(previewView.action, '恢复首个捕获前像（保留当前文件备份）', '不得显示「撤回创建」')
+    // 端到端：文件必须还在，内容是三轮里最新的
+    assert.equal(readFileSync(file, 'utf8'), 'v3-LATEST-WORK', '文件内容未被触碰')
+  })
+
   await test('MEDIUM-7 cross-turn create must not offer to undo the creation', async () => {
     const dir = join(root, 'medium7'); mkdirSync(dir)
     const stateDir = join(dir, 'state'); initState(stateDir)

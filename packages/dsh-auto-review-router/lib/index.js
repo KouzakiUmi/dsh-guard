@@ -564,36 +564,37 @@ async function manualFallback(ctx, config, state, exec, decision, history, entry
     clearTimeout(timer)
     const outcome = ['allowed-once', 'rejected', 'cancelled', 'unavailable'].includes(response) ? response : 'unavailable'
     const final = controller.signal.aborted ? 'cancelled' : outcome
-    history.manualOutcome(entry, final)
-    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
-    if (final === 'allowed-once') {
-      // R6：只有用户显式放行才写记忆。放行本身即显式授权。
-      if (risk === 'medium' && entry?.approvalRequestId) {
-        const memo = grantMemoFor(state, exec)
-        const target = targetPathOf(exec.arguments)
-        const opClass = operationClassOf(exec.name, exec.arguments)
-        if (target !== undefined && opClass !== undefined) {
-          // N6：写入失败必须留痕。此前返回值被直接丢弃，记忆没生效时
-          // 用户和审计都无从知晓——只能靠「下次又问」反推。
-          // 成功时不再重复记 manual 行（manualOutcome 已记过，重复会污染账本）。
-          let result = { ok: false, reason: 'store-unavailable' }
-          try {
-            result = memo.remember(target, opClass, {
-              session: sessionIdOf(exec.agent?.session),
-              tool: exec.name,
-              approvalRequestId: entry.approvalRequestId,
-            })
-          } catch {
-            result = { ok: false, reason: 'threw' }
-          }
-          if (!result.ok) {
-            entry.grantStoreFailure = String(result.reason).slice(0, 40)
-            ctx.logger?.warn?.(`auto-review-router: 授权记忆写入失败，本次放行但下次仍会询问：${entry.grantStoreFailure}`)
-          }
+    // R6：只有用户显式放行才写记忆。放行本身即显式授权。
+    // 2026-10-05 第三轮复核实证（MEDIUM-2）：记忆写入必须发生在 manualOutcome **之前** ——
+    // 那是 manual 行唯一的落账点，事后往 entry 上挂字段永远不会进账本
+    // （record() 只透传白名单字段，且不读 entry 上的任意属性）。
+    let grantCause = null
+    if (final === 'allowed-once' && risk === 'medium' && entry?.approvalRequestId) {
+      const memo = grantMemoFor(state, exec)
+      const target = targetPathOf(exec.arguments)
+      const opClass = operationClassOf(exec.name, exec.arguments)
+      if (target !== undefined && opClass !== undefined) {
+        let result = { ok: false, reason: 'store-unavailable' }
+        try {
+          result = memo.remember(target, opClass, {
+            session: sessionIdOf(exec.agent?.session),
+            tool: exec.name,
+            approvalRequestId: entry.approvalRequestId,
+          })
+        } catch {
+          result = { ok: false, reason: 'threw' }
+        }
+        // N6：写入失败必须留痕 —— 用户和审计都应知道「记忆没生效」，
+        // 而不能只靠「下次又问」反推。cause 是 record() 白名单里的字段。
+        grantCause = result.ok ? 'granted-directory' : `grant-not-stored:${String(result.reason).slice(0, 40)}`
+        if (!result.ok) {
+          ctx.logger?.warn?.(`auto-review-router: 授权记忆写入失败，本次放行但下次仍会询问：${String(result.reason)}`)
         }
       }
-      return { kind: 'allow' }
     }
+    history.manualOutcome(entry, final, grantCause === null ? undefined : { cause: grantCause })
+    if (!state.accepting || state.lifecycle.signal.aborted || exec.signal?.aborted) return { kind: 'cancel' }
+    if (final === 'allowed-once') return { kind: 'allow' }
     return denied(exec.name, final === 'cancelled' && entry?.abortCause === 'timeout'
       ? 'manual approval timed out' : `manual approval ${final}`)
   } finally {

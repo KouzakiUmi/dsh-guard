@@ -13,6 +13,10 @@ import { REVIEW_POLICY, parseDecision, resolveReviewRoute } from '../lib/policy.
 // 授权记忆的可授权性判定要求目录链可信且非敏感根；os.tmpdir() 落在
 // %LOCALAPPDATA% 下会被判为 AppData 敏感段，因此测试目录放在 D 盘根下。
 const root = mkdtempSync('D:\\dsh-selftest-')
+// profileContext.dir 决定授权记忆是否可用（index.js 据此创建 store）。
+// 缺了它 → NOOP_GRANTS → preview() 恒为 store-unavailable → 文案只会说
+// 「仅对本次生效」。两条 HIGH-4 用例分别需要「有 store」与「无 store」。
+const profileDir = mkdtempSync('D:\\dsh-selftest-profile-')
 
 let failed = 0
 
@@ -295,6 +299,10 @@ function fakeCtx(options = {}) {
       }
     },
   }
+  // profileContext 是授权记忆 store 的唯一来源；生产运行时一定有，
+  // 测试也必须有 —— 否则 preview() 恒为 store-unavailable，
+  // HIGH-4 的正向用例（文案承诺会记住）无法成立。
+  if (ctx.profileContext === undefined) ctx.profileContext = { dir: profileDir }
   return ctx
 }
 

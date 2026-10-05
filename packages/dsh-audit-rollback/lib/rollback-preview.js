@@ -70,13 +70,19 @@ function inspect(stateDir, entries, g) {
   // 判据：before.existed === false 且 before.guards 为空 → 跳过基线比对。
   const beforeBaselineEmpty = before?.existed === false && Array.isArray(before.guards) && before.guards.length === 0
   if (before && after && !beforeBaselineEmpty && !same(before.guards, after.guards)) reason ||= 'BASELINE_ANCESTOR_CHANGED'
-  // 2026-10-05 修正（N9）：HIGH-5 跳过基线比对后暴露一个新错误——g.first 是**首个**
-  // before，g.last 是**末个** after，跨轮时二者不同轮。turn1 建文件、turn2 编辑它，
-  // 于是 before.existed=false 却拿 turn2 的 after 相比，changeType 报 created、
-  // action 说「撤回创建」，restore 真把含最新内容的文件删了。
-  // 判据：before 声称「文件原本不存在」时，必须**同轮**就有 after；跨轮说明
-  // 文件在创建之后又被改过，撤回动作会丢掉后续工作 —— 不给出可回滚结论。
-  if (beforeBaselineEmpty && after && after.turn !== before.turn) reason ||= 'CREATED_IN_EARLIER_TURN'
+  // 2026-10-05 修正（N9 / 第三轮 HIGH-1）：HIGH-5 跳过基线比对后暴露一个新错误——
+  // g.first 是**首个** before，g.last 是**末个** after，跨轮时二者不同轮。
+  // turn1 建文件、turn2 编辑它 → changeType 报 created、action 说「撤回创建」，
+  // restore 真把含最新内容的文件删掉（第三轮实测三轮编辑，文件被删）。
+  //
+  // 判据必须只看 `before.existed === false`，**不能**挂在 beforeBaselineEmpty 上：
+  // 那个条件要求 guards 为空，只覆盖「新建目录」；而在**已存在目录里新建文件**
+  // （最常见的情况）probeFile 返回的是完整非空 guards，判据根本不触发。
+  // guards 是否为空是 HIGH-5 用来区分「新建目录」与「祖先被换」的信号，
+  // 与「文件是否被创建过」是两件事，不该复用。
+  const createdEarlier = before?.existed === false && after !== null && after !== undefined
+    && after.turn !== before.turn
+  if (createdEarlier) reason ||= 'CREATED_IN_EARLIER_TURN'
   if (g.captures.some(({ e }) => e.phase === 'before' && !g.captures.some(({ e: post }) => post.phase === 'after' && post.turn === e.turn))) reason ||= 'INCOMPLETE_TURN_CAPTURE'
   // Full-only applies to EVERY captured image, not just the displayed endpoints.
   let historyComplete = true
@@ -109,8 +115,8 @@ function inspect(stateDir, entries, g) {
   if (before && after && before.existed === after.existed && before.hash === after.hash) reason ||= 'NO_CAPTURED_CHANGE'
   // 跨轮创建后又被编辑：实际是「修改」，不是「创建」。报 created 会让 UI 显示
   // 「撤回创建」，掩盖了「这里有一份后续工作会被删掉」的真实含义。
-  const crossTurnCreate = beforeBaselineEmpty && after && after.turn !== before.turn
-  const changeType = !before || !after ? 'unknown' : crossTurnCreate ? 'modified'
+  // 判据与 CREATED_IN_EARLIER_TURN 同源（只看 before.existed，不看 guards）。
+  const changeType = !before || !after ? 'unknown' : createdEarlier ? 'modified'
     : before.existed === false && after.existed ? 'created'
       : before.existed && after.existed === false ? 'deleted'
         : before.hash === after.hash ? 'unchanged' : 'modified'

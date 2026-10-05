@@ -339,13 +339,16 @@ export function createApprovalHistory(ctx, { fs = fileSystem, queueLimit = 512, 
   }
   // Synchronous capture: the manual-approval outcome is latched and queued without
   // awaiting persistence, so a stalled ledger can never delay the admission decision.
-  function manualOutcome(entry, outcome) {
+  function manualOutcome(entry, outcome, extra) {
     if (!entry || entry.manualReported && entry.observedManualOutcome === outcome) return
     entry.manualReported = true
     entry.observedManualOutcome = outcome
     try {
       record(entry, 'manual', outcome, { ...(entry.approvalRequestId ? { approvalRequestId: entry.approvalRequestId } : {}),
-        ...(entry.abortCause ? { cause: entry.abortCause } : {}) })
+        ...(entry.abortCause ? { cause: entry.abortCause } : {}),
+        // 2026-10-05：授权记忆的成败必须在这一行落账（这是 manual 唯一的落账点）。
+        // 传入优先级高于 abortCause：两者不会同时出现，但显式声明避免歧义。
+        ...(extra && extra.cause ? { cause: extra.cause } : {}) })
     } catch { gap('AUDIT_OBSERVER_FAILED', 'droppedRecords') }
   }
   function result(exec, value) {
