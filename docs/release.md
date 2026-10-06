@@ -55,8 +55,9 @@ node scripts/prepare-release.mjs
 - GitHub 仓库 `KouzakiUmi/dsh-guard` 必须**已存在**（本仓库不代为建仓、不推送、不打 tag，
   这些动作由维护者确认后执行）。
 - 推送 main 后，`ci.yml` 自动创建 `build-<sha12>` GitHub Release 并标为 latest；该流程不发布 npm。
-- 版本化发布需要 GitHub Actions secret `NPM_TOKEN` 有发布权限；`release.yml` 仅在
-  `v<version>` tag 与两包版本一致时发布 npm。
+- npm 版本化发布使用 Trusted Publishing：在两个 npm 包的设置中分别把
+  `KouzakiUmi/dsh-guard` 仓库与 `.github/workflows/release.yml` 配为 Trusted Publisher。
+  `release.yml` 仅在 `v<version>` tag 与两包版本一致时申请 OIDC 并发布 npm，不需要保存长期写令牌。
 
 ## 故障处置
 

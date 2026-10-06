@@ -2,8 +2,8 @@
 /**
  * 版本化 npm 发布（由 release.yml 的 `v*` tag 触发）。
  *
- * 只用 node:* 内建模块；真正的上传交给 npm CLI，认证读 NODE_AUTH_TOKEN
- * （由 actions/setup-node 的 registry-url 写入 .npmrc）。
+ * 只用 node:* 内建模块；真正的上传交给 npm CLI。GitHub Actions 优先用
+ * npm Trusted Publishing 的 OIDC；本地/备用 CI 可用 NPM_TOKEN 或 NODE_AUTH_TOKEN。
  *
  * 为什么要有这个脚本，而不是一行 `npm publish`：
  *   1. **幂等**——release.yml 可能重跑，npm 对已发布版本会 E403 直接失败。
@@ -136,11 +136,11 @@ if (todo.length !== decisions.length) {
 
 // ---- 认证前置检查：给出可执行的指引，而不是让 npm 抛晦涩错误 ----
 const token = process.env.NPM_TOKEN || process.env.NODE_AUTH_TOKEN
-if (!token) {
+const hasGithubOidc = Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN)
+if (!token && !hasGithubOidc) {
   fail(
-    '未配置 npm 认证令牌。请在 GitHub 仓库 Settings → Secrets and variables → Actions 新增 ' +
-    'secret NPM_TOKEN（npmjs.com → Access Tokens → Generate automation token，勾选 ' +
-    '"Read and write permissions"；只读 token 无法发布），然后重新触发本 workflow。',
+    '没有可用的 npm 发布认证。请配置 npm Trusted Publisher（GitHub Actions OIDC），' +
+    '或为本地/备用 CI 设置 NPM_TOKEN / NODE_AUTH_TOKEN。',
   )
 }
 
@@ -154,10 +154,12 @@ for (const { pkg } of todo) {
   const asset = join(root, 'dist', `${pkg}.tgz`)
   log(`发布 ${pkg}@${current}（${asset}）`)
   try {
-    const out = execFileSync('npm', ['publish', asset, '--tag', 'latest'], {
+    // npm publish 默认将版本标为 latest；不显式传 --tag，避免触发 OIDC 的
+    // 单独 dist-tag 管理权限与更高 CLI 版本要求。
+    const out = execFileSync('npm', ['publish', asset], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, NODE_AUTH_TOKEN: token },
+      env: { ...process.env, ...(token ? { NODE_AUTH_TOKEN: token } : {}) },
     })
     if (out.trim()) log(out.trim())
   } catch (error) {

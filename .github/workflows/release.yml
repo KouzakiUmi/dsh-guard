@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
     concurrency:
       group: versioned-release-${{ github.ref }}
       cancel-in-progress: false
@@ -110,12 +111,12 @@ jobs:
           # latest 由 main 的自动发布维护，旧 tag 不得使它回退。
           make_latest: false
 
+      # npm Trusted Publishing 使用 GitHub OIDC；无需长期 npm token。
+      # 请在两个 npm 包的设置中将本仓库与本 workflow 配为 Trusted Publisher。
       # npm 发布绑在 v* tag 上，而不是每次 push main。
       # 理由：npm 版本号唯一且不可覆盖，而 main 每次 push 都发 GitHub Release
       # （tag 为 build-<sha12>，天然唯一）。若跟着 main 自动发 npm，第二次推送
       # 就会因版本号重复而 E403。tag 已在上一步强制等于 v<version>，版本唯一性由构造保证。
       # 脚本内部还会查 registry 做幂等与防回退判断，重跑本 workflow 安全。
       - name: Publish to npm
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm.mjs
