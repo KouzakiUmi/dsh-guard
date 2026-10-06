@@ -2,7 +2,7 @@
 
 本仓库是 monorepo，**一次发布两个包**（`dsh-audit-rollback` 与 `dsh-auto-review-router`），
 产物为 `dist/dsh-audit-rollback.tgz` 与 `dist/dsh-auto-review-router.tgz`，
-一个 GitHub Release 挂两个资产。实现口径见 `docs/release-plan.md`。
+一个 GitHub Release 挂两个资产；版本化 tag 还会把这两个 tarball 发布到 npm。实现口径见 `docs/release-plan.md`。
 
 ## 本地完整复现 CI（逐条命令）
 
@@ -42,9 +42,11 @@ node scripts/prepare-release.mjs
 
 ## latest 语义
 
-- **只有 main 的自动发布打 `latest`**（`make_latest: true`），这是用户硬要求。
-- `v*` tag 的版本化发布 `make_latest: false` —— 旧 tag 的补发不会让 latest 回退。
-- 防旧构建覆盖：publish job 在发布前用 `gh api repos/<repo>/git/ref/heads/main` 比对
+- GitHub Releases：只有 main 的自动发布设置 `make_latest: true`；`v*` 版本化发布设置
+  `make_latest: false`，重跑旧 tag 不会改变 GitHub 的 latest release。
+- npm：仅 `v<version>` 版本化发布会更新两个包的 `latest` dist-tag。发布脚本查询 registry，
+  已发布版本会跳过；若任一包已有更高版本，则整组跳过，避免 latest 回退或两包版本失配。
+- 防旧构建覆盖 GitHub latest：publish job 在发布前用 `gh api repos/<repo>/git/ref/heads/main` 比对
   当前构建的 commit；若 main 已有更新提交，则输出 `current=false` 并跳过发布，
   避免排队中的旧构建在新提交到达后覆盖 latest。
 
@@ -52,7 +54,9 @@ node scripts/prepare-release.mjs
 
 - GitHub 仓库 `KouzakiUmi/dsh-guard` 必须**已存在**（本仓库不代为建仓、不推送、不打 tag，
   这些动作由维护者确认后执行）。
-- 推送 main 后，`ci.yml` 的 publish job 自动发布 `build-<sha12>` 并标 latest。
+- 推送 main 后，`ci.yml` 自动创建 `build-<sha12>` GitHub Release 并标为 latest；该流程不发布 npm。
+- 版本化发布需要 GitHub Actions secret `NPM_TOKEN` 有发布权限；`release.yml` 仅在
+  `v<version>` tag 与两包版本一致时发布 npm。
 
 ## 故障处置
 

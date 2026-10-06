@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          # 写入 .npmrc，把 NODE_AUTH_TOKEN 关联到公共 registry。
+          # 只写 URL，不写 token——token 一律走仓库 secret（硬约束：workflow 不得出现硬编码密钥）。
+          registry-url: 'https://registry.npmjs.org'
 
       # 与 CI 一致的隔离测试依赖，不运行生命周期脚本。
       - name: Install test dependencies without lifecycle scripts
@@ -106,3 +109,13 @@ jobs:
           generate_release_notes: true
           # latest 由 main 的自动发布维护，旧 tag 不得使它回退。
           make_latest: false
+
+      # npm 发布绑在 v* tag 上，而不是每次 push main。
+      # 理由：npm 版本号唯一且不可覆盖，而 main 每次 push 都发 GitHub Release
+      # （tag 为 build-<sha12>，天然唯一）。若跟着 main 自动发 npm，第二次推送
+      # 就会因版本号重复而 E403。tag 已在上一步强制等于 v<version>，版本唯一性由构造保证。
+      # 脚本内部还会查 registry 做幂等与防回退判断，重跑本 workflow 安全。
+      - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-npm.mjs

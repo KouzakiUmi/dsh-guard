@@ -1,6 +1,6 @@
 # dsh-auto-review-router
 
-为 DeepSeek Harness 的 Auto 预设提供可配置模型审查、人工审批回退和审批历史。包版本 `0.3.2`，验证基线 DSH `0.2.1-alpha.1`。安装方式见 [仓库 README](../../README.md#安装)。
+为 DeepSeek Harness 的 Auto 预设提供可配置模型审查、人工审批回退和审批历史。包版本 `0.3.3`，验证基线 DSH `0.2.1-alpha.1`。安装方式见 [仓库 README](../../README.md#安装)。
 
 ## 快速使用
 

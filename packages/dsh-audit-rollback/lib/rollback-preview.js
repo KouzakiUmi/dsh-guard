@@ -175,18 +175,21 @@ export function compactDiff(a, b) {
 /** Instances are fiber-owned; previews never survive restart/unload. */
 export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSession = () => { throw new Error('SESSION_VERIFIER_UNAVAILABLE') }, captureTools } = {}) {
   const tickets = new Map()
-  const writers = writerSet(captureTools)
+  // captureTools is volatile config. Accept a getter so a long-lived remote API
+  // observes settings edits made after startup, just like the capture listener.
+  const writers = () => writerSet(typeof captureTools === 'function' ? captureTools() : captureTools)
   const write = io.writeSync || writeSync
   const record = io.appendEntry || appendEntry
   const lookup = (sessionId, entryId) => {
     session(sessionId)
     if (typeof entryId !== 'string' || !/^entry-[a-f0-9]{64}$/.test(entryId)) throw new Error('INVALID_ENTRY_ID')
     const entries = readAllEntries(stateDir)
-    let g = groups(entries, sessionId, undefined, writers).find((g) => g.entryId === entryId)
+    const activeWriters = writers()
+    let g = groups(entries, sessionId, undefined, activeWriters).find((g) => g.entryId === entryId)
     if (!g) {
       const turns = new Set(entries.filter((e) => e.session === sessionId && Number.isSafeInteger(e.turn)).map((e) => e.turn))
       for (const turn of turns) {
-        g = groups(entries, sessionId, turn, writers).find((g) => g.entryId === entryId)
+        g = groups(entries, sessionId, turn, activeWriters).find((g) => g.entryId === entryId)
         if (g) break
       }
     }
@@ -206,7 +209,7 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
       // 2026-10-06：列表只列**有 capture 的文件组**。「已修改文件」的语义是
       // 「文件工具确实改过、并且改前改后都有快照」，只有 call 没有 capture 的路径
       // 没有可恢复内容（旧口径会把只读调用也列进来，见 groups() 注释）。
-      const all = groups(entries, sessionId, turn, writers).filter((g) => g.captures.length > 0)
+      const all = groups(entries, sessionId, turn, writers()).filter((g) => g.captures.length > 0)
       const rows = all.slice(cursor, cursor + limit).map((g) => inspect(stateDir, entries, g).row)
       return { sessionId, rows, total: all.length, nextCursor: cursor + limit < all.length ? cursor + limit : null,
         coverage: '只列有前后像快照的文件；shell、其他插件、人工改动未覆盖，仅被读取的文件不计入。捕获不代表工具已执行或成功。diff 是首个前像与当前文件对比，不是完整会话 netdiff。' }

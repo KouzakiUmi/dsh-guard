@@ -1,6 +1,6 @@
 {
   "name": "dsh-auto-review-router",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "可指定模型的 Auto 审查：reviewer 路由来自插件配置，缺省回退当前会话。",
   "type": "module",
   "main": "./lib/index.js",

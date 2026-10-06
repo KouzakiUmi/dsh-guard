@@ -151,9 +151,20 @@ for (const name of names) {
 			ok(name, `cordis.patch.yml 含 insert 条目（${name}）`);
 		}
 	}
+
+	// 8. 可发布性：2026-10-05 起本仓库公开发布到 npm（commit 7af9625 去掉了 private）。
+	//    这两项一旦被回退，CI 仍会全绿、GitHub Release 仍会发，但 npm publish 会在
+	//    真正发布那一刻才失败——把门禁提前到 manifest 校验。
+	if (pkg.private === true) {
+		fail(name, "private=true 的包无法发布到 npm；本仓库已启用公开发布");
+	} else if (pkg.publishConfig?.access !== "public") {
+		fail(name, `publishConfig.access 应为 "public"，实际 ${JSON.stringify(pkg.publishConfig?.access)}`);
+	} else {
+		ok(name, "可发布（private 未置位，publishConfig.access = public）");
+	}
 }
 
-// 8. 两包 version 相等（跨包检查，只在根脚本里做一次）
+// 9. 两包 version 相等（跨包检查，只在根脚本里做一次）
 const distinct = new Set(versions.values());
 if (versions.size > 1 && distinct.size === 1) {
 	ok("(跨包)", `两包 version 一致: ${[...distinct][0]}`);

@@ -219,6 +219,14 @@ try {
     const countedRow = (await counted.changedFiles({ sessionId: s.sessionId })).rows[0]
     assert.equal(countedRow.canRestore, false, 'captureTools 含 read 时该轮应计入改动意图')
     assert.equal(countedRow.reason, 'UNCAPTURED_TOOL_TARGET')
+
+    const liveTools = ['write']
+    const liveApi = createRollbackApi(s.stateDir, { assertSession: async () => {}, captureTools: () => liveTools })
+    assert.equal((await liveApi.changedFiles({ sessionId: s.sessionId })).rows[0].canRestore, true)
+    liveTools.push('read')
+    const liveRow = (await liveApi.changedFiles({ sessionId: s.sessionId })).rows[0]
+    assert.equal(liveRow.canRestore, false, '长驻 remote API 必须读取最新的 volatile captureTools')
+    assert.equal(liveRow.reason, 'UNCAPTURED_TOOL_TARGET')
   })
   await test('missing session verifier fails closed on every method (HIGH-3 default)', async () => {
     const s = scenario(), p = await s.preview()

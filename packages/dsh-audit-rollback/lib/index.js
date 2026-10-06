@@ -384,7 +384,7 @@ function exposeAuditRemote(ctx) {
     const liveConfig = runtimeByCtx.get(ctx).readConfig()
     const api = createRollbackApi(liveConfig.stateDir, {
       assertSession: createSessionVerifier(ctx),
-      captureTools: liveConfig.captureTools,
+      captureTools: () => runtimeByCtx.get(ctx)?.readConfig().captureTools,
     })
     service.changedFiles = function changedFiles(request) { return api.changedFiles(request) }
     service.preview = function preview(request) { return api.preview(request) }

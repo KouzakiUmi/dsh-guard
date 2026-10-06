@@ -1,6 +1,6 @@
 # dsh-audit-rollback
 
-为 DeepSeek Harness 文件工具提供持久审计和文件恢复。包版本 `0.3.2`，验证基线 DSH `0.2.1-alpha.1`。安装方式见 [仓库 README](../../README.md#安装)。
+为 DeepSeek Harness 文件工具提供持久审计和文件恢复。包版本 `0.3.3`，验证基线 DSH `0.2.1-alpha.1`。安装方式见 [仓库 README](../../README.md#安装)。
 
 ## 功能
 
