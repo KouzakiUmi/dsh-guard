@@ -15,15 +15,37 @@ const publicVersion = (p) => ({ existed: p.existed, bytes: p.bytes, hash: p.exis
   status: p.existed === null ? 'unsafe-or-unreadable' : p.oversized ? 'oversized' : p.existed ? 'file' : 'absent' })
 const image = (e) => e ? { available: e.existed === false || /^[a-f0-9]{40}$/.test(e.hash || ''), existed: e.existed, hash: e.hash, bytes: e.bytes } : null
 
+/**
+ * 默认写工具名单。lib/index.js 从这里 import，避免两处默认值漂移。
+ * 必须是冻结的：调用方若就地修改会污染后续所有 API 实例的默认行为。
+ */
+export const DEFAULT_CAPTURE_TOOLS = Object.freeze(['write', 'edit', 'str_replace_editor'])
+
 function session(value) {
   if (typeof value !== 'string' || !value || value === 'unknown' || value.length > 512) throw new Error('INVALID_SESSION')
   return value
 }
-function groups(entries, sessionId, turn) {
+function writerSet(captureTools) {
+  const names = Array.isArray(captureTools) ? captureTools : DEFAULT_CAPTURE_TOOLS
+  const set = new Set(names.filter((n) => typeof n === 'string' && n.length > 0))
+  return set.size > 0 ? set : new Set(DEFAULT_CAPTURE_TOOLS)
+}
+/**
+ * 聚合会话内按物理文件归并的条目。
+ *
+ * 2026-10-06 修正：只读工具的 call 目标**不**再建立文件组。read/grep/glob
+ * 都会带 path 参数，旧口径把它们全量并进「已修改文件」，于是三个只读工具贡献了
+ * 2911 条路径、1193 个文件组——占列表 73%——它们从未被写工具碰过，自然也
+ * 没有任何 capture，UI 只能显示成 captureStatus='not-captured'（没有前像），
+ * 看上去像快照功能整体失效。写工具的 call 仍保留，用于 UNCAPTURED_TOOL_TARGET
+ * （某轮声明要改这个路径却没有快照）与工具名展示。
+ */
+function groups(entries, sessionId, turn, writers) {
   const map = new Map()
   entries.forEach((e, index) => {
     if (e.session !== sessionId || !Number.isSafeInteger(e.turn) || (turn !== undefined && e.turn !== turn)) return
-    const paths = e.kind === 'capture' ? [e.path] : e.kind === 'call' && Array.isArray(e.targets) ? e.targets : []
+    const paths = e.kind === 'capture' ? [e.path]
+      : e.kind === 'call' && Array.isArray(e.targets) && writers.has(e.tool) ? e.targets : []
     for (const path of paths) {
       if (typeof path !== 'string' || !path) continue
       // Aggregate by canonical key so case aliases of one physical file share a
@@ -151,19 +173,20 @@ export function compactDiff(a, b) {
 }
 
 /** Instances are fiber-owned; previews never survive restart/unload. */
-export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSession = () => { throw new Error('SESSION_VERIFIER_UNAVAILABLE') } } = {}) {
+export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSession = () => { throw new Error('SESSION_VERIFIER_UNAVAILABLE') }, captureTools } = {}) {
   const tickets = new Map()
+  const writers = writerSet(captureTools)
   const write = io.writeSync || writeSync
   const record = io.appendEntry || appendEntry
   const lookup = (sessionId, entryId) => {
     session(sessionId)
     if (typeof entryId !== 'string' || !/^entry-[a-f0-9]{64}$/.test(entryId)) throw new Error('INVALID_ENTRY_ID')
     const entries = readAllEntries(stateDir)
-    let g = groups(entries, sessionId).find((g) => g.entryId === entryId)
+    let g = groups(entries, sessionId, undefined, writers).find((g) => g.entryId === entryId)
     if (!g) {
       const turns = new Set(entries.filter((e) => e.session === sessionId && Number.isSafeInteger(e.turn)).map((e) => e.turn))
       for (const turn of turns) {
-        g = groups(entries, sessionId, turn).find((g) => g.entryId === entryId)
+        g = groups(entries, sessionId, turn, writers).find((g) => g.entryId === entryId)
         if (g) break
       }
     }
@@ -180,10 +203,13 @@ export function createRollbackApi(stateDir, { now = Date.now, io = {}, assertSes
       session(sessionId)
       if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (turn !== undefined && !Number.isSafeInteger(turn))) throw new Error('INVALID_PAGE')
       const entries = readAllEntries(stateDir)
-      const all = groups(entries, sessionId, turn)
+      // 2026-10-06：列表只列**有 capture 的文件组**。「已修改文件」的语义是
+      // 「文件工具确实改过、并且改前改后都有快照」，只有 call 没有 capture 的路径
+      // 没有可恢复内容（旧口径会把只读调用也列进来，见 groups() 注释）。
+      const all = groups(entries, sessionId, turn, writers).filter((g) => g.captures.length > 0)
       const rows = all.slice(cursor, cursor + limit).map((g) => inspect(stateDir, entries, g).row)
       return { sessionId, rows, total: all.length, nextCursor: cursor + limit < all.length ? cursor + limit : null,
-        coverage: '仅捕获配置中的文件工具显式路径；shell、其他插件、人工改动未覆盖。捕获不代表工具已执行或成功。diff 是首个前像与当前文件对比，不是完整会话 netdiff。' }
+        coverage: '只列有前后像快照的文件；shell、其他插件、人工改动未覆盖，仅被读取的文件不计入。捕获不代表工具已执行或成功。diff 是首个前像与当前文件对比，不是完整会话 netdiff。' }
     },
     async preview(request) {
       parseRollbackRequest('preview', request)

@@ -164,7 +164,16 @@ try {
     let time = 0; const s = scenario({ apiOptions: { now: () => time } }), p = await s.preview(); time = 120001
     await assert.rejects(s.api.restore(s.bind(p)), /INVALID_OR_EXPIRED/)
     const q = await s.preview(); s.api.dispose(); await assert.rejects(s.api.restore(s.bind(q)), /INVALID_OR_EXPIRED/)
-    for (let i = 0; i < 30; i++) appendEntry(s.stateDir, { kind: 'call', session: s.sessionId, turn: 9, tool: 'shell', targets: [join(s.dir, 'target' + i)] })
+    // 2026-10-06：分页样本改成真正带快照的文件。旧口径往账本塞 30 条零 capture 的
+    // shell 目标并断言它们进列表；那正是「已修改文件」被噪音淹没的来源。
+    for (let i = 0; i < 30; i++) {
+      const file = join(s.dir, 'page-' + i)
+      writeFileSync(file, 'old-' + i)
+      capturePath(s.stateDir, { session: s.sessionId, turn: 9, path: file, phase: 'before', maxBytes: UI_MAX_BYTES, tool: 'write' })
+      writeFileSync(file, 'new-' + i)
+      capturePath(s.stateDir, { session: s.sessionId, turn: 9, path: file, phase: 'after', maxBytes: UI_MAX_BYTES })
+    }
+    appendEntry(s.stateDir, { kind: 'turn/end', session: s.sessionId, turn: 9 })
     const first = await s.api.changedFiles({ sessionId: s.sessionId, limit: 25 }); assert.equal(first.rows.length, 25); assert.equal(first.total, 31); assert.equal(first.nextCursor, 25)
     const second = await s.api.changedFiles({ sessionId: s.sessionId, cursor: 25, limit: 25 }); assert.equal(second.rows.length, 6); assert.equal(second.nextCursor, null)
     assert.equal((await s.api.changedFiles({ sessionId: s.sessionId, turn: 1 })).total, 1)
@@ -186,6 +195,30 @@ try {
     for (const row of rows.slice(1)) assert.equal((await s.api.preview({ sessionId: s.sessionId, entryId: row.entryId })).canRestore, true)
     await assert.rejects(s.api.restore(s.bind(firstPreview)), /INVALID_OR_EXPIRED/)
     assert.equal(readFileSync(s.file, 'utf8'), 'new\nline\n')
+  })
+  await test('read-only tool targets never become "changed files"; only snapshots are listed', async () => {
+    const s = scenario()
+    // read/grep/glob 都会带 path 参数。旧口径把它们并进文件组，这些组永远没有
+    // capture，只能显示成 not-captured——「已修改文件」因此被只读路径淹没。
+    for (const tool of ['read', 'grep', 'glob']) {
+      for (let i = 0; i < 5; i++) appendEntry(s.stateDir, { kind: 'call', session: s.sessionId, turn: 7, tool, callId: tool + i, targets: [join(s.dir, tool + '-' + i + '.txt')] })
+    }
+    appendEntry(s.stateDir, { kind: 'turn/start', session: s.sessionId, turn: 7, cwd: s.dir })
+    appendEntry(s.stateDir, { kind: 'turn/end', session: s.sessionId, turn: 7, captured: 0 })
+    const listed = await s.api.changedFiles({ sessionId: s.sessionId })
+    assert.deepEqual(listed.rows.map((r) => r.path), [s.file], '只列真正有快照的文件')
+    assert.equal(listed.total, 1)
+    assert.notEqual(listed.rows[0].captureStatus, 'not-captured', '列表内不应再出现 not-captured')
+    assert.equal(listed.rows[0].canRestore, true, '混合只读调用不得污染本文件的可恢复判定')
+    // 覆盖文案必须说明只读文件不计入，否则 UI 仍会误导。
+    assert.match(listed.coverage, /只列有前后像快照/)
+    // captureTools 是活的配置，不是硬编码名单：把 read 也算作写工具后，
+    // 「本轮声明要改这个路径却没有快照」必须重新触发拒绝。
+    appendEntry(s.stateDir, { kind: 'call', session: s.sessionId, turn: 7, tool: 'read', callId: 'r1', targets: [s.file] })
+    const counted = createRollbackApi(s.stateDir, { assertSession: async () => {}, captureTools: ['read'] })
+    const countedRow = (await counted.changedFiles({ sessionId: s.sessionId })).rows[0]
+    assert.equal(countedRow.canRestore, false, 'captureTools 含 read 时该轮应计入改动意图')
+    assert.equal(countedRow.reason, 'UNCAPTURED_TOOL_TARGET')
   })
   await test('missing session verifier fails closed on every method (HIGH-3 default)', async () => {
     const s = scenario(), p = await s.preview()

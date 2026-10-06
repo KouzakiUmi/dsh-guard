@@ -18,6 +18,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import {
   appendEntry,
+  canonicalPathKey,
   capturePath,
   createTurnState,
   initState,
@@ -29,7 +30,7 @@ import {
 } from './ledger.js'
 
 import { readConfigValues } from './config.js'
-import { createRollbackApi } from './rollback-preview.js'
+import { createRollbackApi, DEFAULT_CAPTURE_TOOLS } from './rollback-preview.js'
 import { rollbackDescriptors, rollbackMethods } from './rollback-remote.js'
 export { Config } from './config.js'
 
@@ -37,9 +38,6 @@ export const name = 'audit-rollback'
 
 /** 只强依赖工具注册表（契约第 5.1 节）。 */
 export const inject = ['tools']
-
-/** 默认捕获的工具名（契约第 5.4 节）。 */
-const DEFAULT_CAPTURE_TOOLS = ['write', 'edit', 'str_replace_editor']
 
 /** 默认捕获上限：2 MiB（2097152，契约 §2.1 写定，与 cordis.patch.yml 默认值逐字段一致）。 */
 const DEFAULT_CAPTURE_MAX_BYTES = 2 * 1024 * 1024
@@ -382,8 +380,11 @@ function exposeAuditRemote(ctx) {
     service.read = function read() {
       return queryAuditStatus(ctx)
     }
-    const api = createRollbackApi(runtimeByCtx.get(ctx).readConfig().stateDir, {
+    // captureTools 决定哪些工具的 call 算「改动意图」；列表只列真正有快照的文件。
+    const liveConfig = runtimeByCtx.get(ctx).readConfig()
+    const api = createRollbackApi(liveConfig.stateDir, {
       assertSession: createSessionVerifier(ctx),
+      captureTools: liveConfig.captureTools,
     })
     service.changedFiles = function changedFiles(request) { return api.changedFiles(request) }
     service.preview = function preview(request) { return api.preview(request) }
@@ -506,6 +507,54 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  /**
+   * 补采漏掉的 after 与 turn/end 条目（2026-10-06）。
+   *
+   * `sessions` 是 **apply 实例内存态**：插件热重载或轮次中途加载后 Map 为空，
+   * 此时 turn/end 到达时 `slot.state === null`，旧口径直接跳过整段——该轮的 after
+   * 与 turn/end 永久缺失，文件永远停在 preimage-only 且被 TURN_NOT_ENDED 拒绝。
+   * 现场实测 154 个有 before 的 (session,turn) 中有 4 个正是这样丢的：
+   * turn/start 与 turn/end 事件都在，after 却没写。
+   *
+   * 补救：轮号从事件本身取（重载后 `slot.turn` 还是 -1），回扫账本找出该轮所有
+   * before 路径重新 probe 补写 after，并补 turn/end 条目。**只在这条异常路径上**
+   * 付一次全账本读取，正常轮次沿用内存态、零额外开销（pre-execute 红线不受影响）。
+   *
+   * @returns {number|null} 补写的 after 条数；null 表示账本里该轮本就完整或无从补起
+   */
+  function recoverTurnEnd(sessionId, turn) {
+    const config = readConfig()
+    const stateDir = config.stateDir
+    const before = new Map()
+    const afterSeen = new Set()
+    let hasStart = false
+    let hasEnd = false
+    for (const entry of readAllEntries(stateDir)) {
+      if (entry.session !== sessionId || entry.turn !== turn) continue
+      if (entry.kind === 'turn/start') hasStart = true
+      else if (entry.kind === 'turn/end') hasEnd = true
+      else if (entry.kind === 'capture' && typeof entry.path === 'string') {
+        const key = canonicalPathKey(entry.path)
+        if (entry.phase === 'before') { if (!before.has(key)) before.set(key, entry.path) }
+        else if (entry.phase === 'after') afterSeen.add(key)
+      }
+    }
+    // 已有 turn/end：账本自洽，不重复写。没有 turn/start：本次 turn 根本不属于本插件。
+    if (hasEnd || !hasStart) return null
+    let captured = 0
+    for (const [key, path] of before) {
+      if (afterSeen.has(key)) continue
+      try {
+        capturePath(stateDir, { session: sessionId, turn, path, phase: 'after', maxBytes: config.captureMaxBytes })
+        captured += 1
+      } catch (error) {
+        ctx.logger.warn(`[audit-rollback] 补采 after 失败 ${path}: ${error && error.message ? error.message : error}`)
+      }
+    }
+    appendEntry(stateDir, { kind: 'turn/end', session: sessionId, turn, captured, recovered: true })
+    return captured
+  }
+
   // turn/start：记条目并初始化本轮内存态；turn/end：补 after、记账、清轮态
   const offSessionEvent = ctx.on('session/event', (session, event) => {
     try {
@@ -528,6 +577,18 @@ export function apply(ctx, rawConfig) {
             captured: slot.state.capturedPaths.size,
           })
           slot.state = null // 清理本轮内存态，会话槽位留给下一轮
+        } else {
+          // 内存态已丢（重载/中途加载）：轮号只能取自事件，槽位里的还是 -1。
+          const endTurn = turn >= 0 ? turn : slot.turn
+          if (endTurn >= 0) {
+            const captured = recoverTurnEnd(id, endTurn)
+            if (captured !== null) {
+              ctx.logger.warn(
+                `[audit-rollback] 轮次 ${id}/${endTurn} 的内存态已丢失（插件重载或中途加载），` +
+                `已回扫账本补写 ${captured} 个后像与 turn/end 条目`,
+              )
+            }
+          }
         }
       }
     } catch (error) {

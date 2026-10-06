@@ -456,12 +456,12 @@ window.__ModuleLoader__.load({
       if (!sessionId) return h('p', null, '请先选择会话；不会读取其他会话的文件。')
       return h('section', { style: pageStyle },
         h('h2', null, '已修改文件'),
-        h('p', null, '会话：' + sessionId + '。捕获条目不代表工具成功。仅文件工具显式路径；shell、其他插件、人工编辑未覆盖。'),
+        h('p', null, '会话：' + sessionId + '。只列有前后像快照的文件；仅被读取的文件不计入。捕获条目不代表工具成功；shell、其他插件、人工编辑未覆盖。'),
         running ? h('p', { role: 'status' }, '当前会话运行中；轮次结束后刷新，运行中禁止恢复。') : null,
         h('button', { type: 'button', disabled: busy || running, onClick: () => load(), style: btnStyle }, busy ? '读取中…' : '刷新文件'),
         error ? h('p', { role: 'alert' }, error) : null,
         message ? h('p', { role: 'status' }, message) : null,
-        visible && !visible.rows.length ? h('p', null, '此会话没有文件捕获/目标条目（不表示没有 shell 改动）。') : null,
+        visible && !visible.rows.length ? h('p', null, '此会话没有被文件工具改动的文件（只被读取的文件不计入；不表示没有 shell 改动）。') : null,
         visible ? h('div', null,
           h('p', null, visible.coverage),
           ...visible.rows.map((row) => h('article', { key: row.entryId, style: cardStyle },
@@ -474,7 +474,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', disabled: busy || running, onClick: () => view(row, false), style: btnStyle }, '查看差异'),
             h('button', { type: 'button', disabled: busy || running || !row.canRestore, onClick: () => view(row, true), style: btnStyle }, '恢复此文件'),
           )),
-          h('p', null, '共 ' + visible.total + ' 个路径；当前 ' + (visible.cursor + 1) + '–' + (visible.cursor + visible.rows.length)),
+          h('p', null, '共 ' + visible.total + ' 个已修改文件；当前 ' + (visible.cursor + 1) + '–' + (visible.cursor + visible.rows.length)),
           h('button', { type: 'button', disabled: busy || running || visible.cursor === 0, onClick: () => load(Math.max(0, visible.cursor - 25)) }, '上一页'),
           h('button', { type: 'button', disabled: busy || running || visible.nextCursor === null, onClick: () => load(visible.nextCursor) }, '下一页'),
         ) : null,
@@ -520,7 +520,7 @@ window.__ModuleLoader__.load({
       // 与审批结果卡一致：读取失败不在消息流提示区渲染错误；失败细节由「已修改文件」Tab 的错误态承担。
       if (error) return null
       if (!value || value.sessionId !== sessionId || !value.total) return null
-      return h('small', { role: 'status' }, '已修改文件：' + value.total + ' 个捕获/目标路径。请打开「已修改文件」页签查看差异与单文件恢复；shell 等改动未覆盖。')
+      return h('small', { role: 'status' }, '已修改文件：' + value.total + ' 个有快照的文件。请打开「已修改文件」页签查看差异与单文件恢复；shell 等改动未覆盖。')
     }
 
     const name = 'dsh-audit-rollback'
