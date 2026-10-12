@@ -50,14 +50,39 @@ window.__ModuleLoader__.load({
       colBytes: '字节',
       config: '生效配置',
 
-      gitNote: 'gitSnapshot 当前为 true，但影子 git 快照本阶段未实现。',
+      gitNote: 'gitSnapshot 已开启（阶段 B 总开关）：按 snapshotMode 在步/轮边界写影子快照。',
       editorTitle: '捕获策略设置',
-      editorLimits: 'stateDir 只读，不支持热迁移；gitSnapshot 未实现，不可设置。列表每行一项。保存仅对新轮次生效。',
+      editorLimits: 'stateDir 只读，不支持热迁移；gitSnapshot 是阶段 B 总开关（默认 false），开启后按 snapshotMode 在步/轮边界写快照。列表每行一项。保存仅对新轮次生效。',
       captureTools: '捕获工具名（captureTools）',
       captureMaxBytes: '单文件捕获上限（captureMaxBytes，字节）',
       argsMaxBytes: '参数预览上限（argsMaxBytes，字节）',
       logCalls: '记录工具调用（logCalls）',
       excludeGlobs: '排除规则（excludeGlobs）',
+      gitSnapshot: '阶段 B 总开关（gitSnapshot）',
+      snapshotMode: '快照粒度（snapshotMode）',
+      snapshotExcludeGlobs: '快照排除规则（snapshotExcludeGlobs）',
+      snapshotIgnorePolicy: '快照忽略策略（snapshotIgnorePolicy）',
+      snapshotMaxFiles: '快照文件数预算（snapshotMaxFiles）',
+      snapshotMaxBytes: '快照字节预算（snapshotMaxBytes）',
+      snapshotScanMs: '快照盘点超时（snapshotScanMs，毫秒）',
+      snapshotTimeoutMs: '快照超时（snapshotTimeoutMs，毫秒）',
+      snapshotAutoExcludeOversized: '超预算自动排除（snapshotAutoExcludeOversized）',
+      rollbackOnAbort: '中断后回滚联动（rollbackOnAbort）',
+      snapshotRetentionDays: '快照保留天数（snapshotRetentionDays）',
+      shadowStore: '影子快照库',
+      shadowEnabled: '已启用',
+      shadowWorkspaceKey: '工作区键',
+      shadowObjects: '影子对象数',
+      shadowRefs: '影子引用数',
+      shadowAutoExcluded: '自动排除的顶层项',
+      shadowFused: '熔断原因',
+      snapshotStats: '快照统计',
+      snapshotBoundaries: '边界快照数',
+      snapshotLastTurn: '最近轮次',
+      snapshotLastStep: '最近步',
+      unknownOrOff: '未知/未启用',
+      invalidChoice: '取值必须是允许的选项之一',
+      nonNegativeInteger: '必须是非负安全整数',
       save: '保存',
       saving: '处理中…',
       cancelReload: '取消并重新读取',
@@ -107,14 +132,39 @@ window.__ModuleLoader__.load({
       colBytes: 'Bytes',
       config: 'Effective config',
 
-      gitNote: 'gitSnapshot is true, but the shadow git snapshot is not implemented in this phase.',
+      gitNote: 'gitSnapshot is on (phase B master switch): shadow snapshots are written at step/turn boundaries per snapshotMode.',
       editorTitle: 'Capture policy settings',
-      editorLimits: 'stateDir is read-only: live migration is unsupported. gitSnapshot is unavailable. One list item per line. Saves apply to new turns only.',
+      editorLimits: 'stateDir is read-only: live migration is unsupported. gitSnapshot is the phase B master switch (default false); when enabled, shadow snapshots are written at step/turn boundaries per snapshotMode. One list item per line. Saves apply to new turns only.',
       captureTools: 'Capture tool names (captureTools)',
       captureMaxBytes: 'File capture limit (captureMaxBytes, bytes)',
       argsMaxBytes: 'Argument preview limit (argsMaxBytes, bytes)',
       logCalls: 'Log tool calls (logCalls)',
       excludeGlobs: 'Exclude patterns (excludeGlobs)',
+      gitSnapshot: 'Phase B master switch (gitSnapshot)',
+      snapshotMode: 'Snapshot granularity (snapshotMode)',
+      snapshotExcludeGlobs: 'Snapshot exclude patterns (snapshotExcludeGlobs)',
+      snapshotIgnorePolicy: 'Snapshot ignore policy (snapshotIgnorePolicy)',
+      snapshotMaxFiles: 'Snapshot file budget (snapshotMaxFiles)',
+      snapshotMaxBytes: 'Snapshot byte budget (snapshotMaxBytes)',
+      snapshotScanMs: 'Snapshot scan timeout (snapshotScanMs, ms)',
+      snapshotTimeoutMs: 'Snapshot timeout (snapshotTimeoutMs, ms)',
+      snapshotAutoExcludeOversized: 'Auto-exclude oversized entries (snapshotAutoExcludeOversized)',
+      rollbackOnAbort: 'Rollback on abort (rollbackOnAbort)',
+      snapshotRetentionDays: 'Snapshot retention days (snapshotRetentionDays)',
+      shadowStore: 'Shadow snapshot store',
+      shadowEnabled: 'Enabled',
+      shadowWorkspaceKey: 'Workspace key',
+      shadowObjects: 'Shadow objects',
+      shadowRefs: 'Shadow refs',
+      shadowAutoExcluded: 'Auto-excluded top-level entries',
+      shadowFused: 'Fused reason',
+      snapshotStats: 'Snapshot stats',
+      snapshotBoundaries: 'Boundary snapshots',
+      snapshotLastTurn: 'Last turn',
+      snapshotLastStep: 'Last step',
+      unknownOrOff: 'unknown / not enabled',
+      invalidChoice: 'must be one of the allowed choices',
+      nonNegativeInteger: 'must be a non-negative safe integer',
       save: 'Save',
       saving: 'Working…',
       cancelReload: 'Cancel & reload',
@@ -210,24 +260,63 @@ window.__ModuleLoader__.load({
       return String(value)
     }
 
-    const editableFields = ['captureTools', 'captureMaxBytes', 'argsMaxBytes', 'logCalls', 'excludeGlobs']
+    // 全部 16 个可编辑字段（stateDir 只读，永不入表）。
+    const editableFields = [
+      'captureTools', 'captureMaxBytes', 'argsMaxBytes', 'logCalls', 'excludeGlobs',
+      'gitSnapshot', 'snapshotMode', 'snapshotExcludeGlobs', 'snapshotIgnorePolicy',
+      'snapshotMaxFiles', 'snapshotMaxBytes', 'snapshotScanMs', 'snapshotTimeoutMs',
+      'snapshotAutoExcludeOversized', 'rollbackOnAbort', 'snapshotRetentionDays',
+    ]
+    // 控件类型分派：复选框 / 多行列表 / 下拉枚举（取值集合逐字固定）/ 数字输入。
+    const checkboxFields = ['logCalls', 'gitSnapshot', 'snapshotAutoExcludeOversized']
+    const textareaFields = ['captureTools', 'excludeGlobs', 'snapshotExcludeGlobs']
+    const enumOptions = {
+      snapshotMode: ['per-step', 'per-turn'],
+      snapshotIgnorePolicy: ['git', 'force'],
+      rollbackOnAbort: ['off', 'prompt', 'auto'],
+    }
+    const positiveFields = ['captureMaxBytes', 'argsMaxBytes', 'snapshotMaxFiles', 'snapshotMaxBytes', 'snapshotScanMs', 'snapshotTimeoutMs']
+    // 阶段 B 字段的代码默认值：host describe 意外缺字段时用于兜底展示，不作为写回依据。
+    const draftFallbacks = {
+      snapshotMode: 'per-step', snapshotIgnorePolicy: 'git', rollbackOnAbort: 'prompt',
+      snapshotMaxFiles: 50000, snapshotMaxBytes: 536870912, snapshotScanMs: 5000,
+      snapshotTimeoutMs: 10000, snapshotRetentionDays: 14,
+    }
     function toDraft(value) {
-      return {
+      const draft = {
         captureTools: (value.captureTools || []).join('\n'),
         excludeGlobs: (value.excludeGlobs || []).join('\n'),
         captureMaxBytes: String(value.captureMaxBytes),
         argsMaxBytes: String(value.argsMaxBytes),
         logCalls: value.logCalls === true,
+        gitSnapshot: value.gitSnapshot === true,
+        snapshotAutoExcludeOversized: value.snapshotAutoExcludeOversized === true,
+        snapshotExcludeGlobs: (value.snapshotExcludeGlobs || []).join('\n'),
       }
+      for (const key of Object.keys(enumOptions)) draft[key] = enumOptions[key].includes(value[key]) ? value[key] : draftFallbacks[key]
+      for (const key of [...positiveFields, 'snapshotRetentionDays']) draft[key] = String(value[key] ?? draftFallbacks[key])
+      return draft
     }
     function validateDraft(draft, t = (key) => en[key] || key) {
-      const value = { logCalls: draft.logCalls === true }
-      for (const key of ['captureMaxBytes', 'argsMaxBytes']) {
+      const value = {}
+      for (const key of checkboxFields) value[key] = draft[key] === true
+      // 枚举：取值必须是集合内成员（含 undefined/缺失），非法值抛错。
+      for (const [key, options] of Object.entries(enumOptions)) {
+        if (!options.includes(draft[key])) throw new Error(key + ': ' + t('invalidChoice') + ' (' + options.join(' | ') + ')')
+        value[key] = draft[key]
+      }
+      for (const key of positiveFields) {
         const n = Number(draft[key])
         if (!Number.isSafeInteger(n) || n < 1) throw new Error(key + ': ' + t('positiveInteger'))
         value[key] = n
       }
-      for (const key of ['captureTools', 'excludeGlobs']) {
+      // snapshotRetentionDays 是非负整数：允许 0，但不允许负数/小数/非安全整数。
+      {
+        const n = Number(draft.snapshotRetentionDays)
+        if (!Number.isSafeInteger(n) || n < 0) throw new Error('snapshotRetentionDays: ' + t('nonNegativeInteger'))
+        value.snapshotRetentionDays = n
+      }
+      for (const key of textareaFields) {
         value[key] = String(draft[key]).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
       }
       if (!value.captureTools.length) throw new Error('captureTools: ' + t('toolsRequired'))
@@ -278,13 +367,17 @@ window.__ModuleLoader__.load({
       }
       const field = (key) => h('label', { key, style: { display: 'block', marginTop: 8 } },
         h('span', null, t(key)),
-        key === 'logCalls'
+        checkboxFields.includes(key)
           ? h('input', { type: 'checkbox', 'aria-label': key, checked: draft[key], disabled: busy, onChange: (e) => { setDraft({ ...draft, [key]: e.target.checked }); setMessage('') } })
-          : h(key === 'captureTools' || key === 'excludeGlobs' ? 'textarea' : 'input', {
-              value: draft[key], disabled: busy, type: 'number', min: 1, step: 1,
-              rows: 4, 'aria-label': key, style: { display: 'block', width: '100%', boxSizing: 'border-box' },
-              onChange: (e) => { setDraft({ ...draft, [key]: e.target.value }); setMessage('') },
-            }),
+          : enumOptions[key]
+            ? h('select', { 'aria-label': key, value: draft[key], disabled: busy, style: { display: 'block', width: '100%', boxSizing: 'border-box' }, onChange: (e) => { setDraft({ ...draft, [key]: e.target.value }); setMessage('') } },
+                ...enumOptions[key].map((option) => h('option', { key: option, value: option }, option)),
+              )
+            : h(textareaFields.includes(key) ? 'textarea' : 'input', {
+                value: draft[key], disabled: busy, type: 'number', min: key === 'snapshotRetentionDays' ? 0 : 1, step: 1,
+                rows: 4, 'aria-label': key, style: { display: 'block', width: '100%', boxSizing: 'border-box' },
+                onChange: (e) => { setDraft({ ...draft, [key]: e.target.value }); setMessage('') },
+              }),
       )
       return h('section', { style: cardStyle },
         h('h3', null, t('editorTitle')),
@@ -316,6 +409,9 @@ window.__ModuleLoader__.load({
 
       const kinds = status ? status.ledger.byKind : null
       const recent = status ? status.captures.recent : []
+      // host 侧新增的只读字段：缺失（host 未同步/未启用）时按「未知/未启用」展示，不抛错。
+      const shadow = status && status.shadow && typeof status.shadow === 'object' ? status.shadow : null
+      const stats = status && status.snapshotStats && typeof status.snapshotStats === 'object' ? status.snapshotStats : null
       return h('div', { style: pageStyle },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
           h('h2', { style: { margin: 0, fontSize: 16 } }, t('title')),
@@ -378,6 +474,24 @@ window.__ModuleLoader__.load({
           line('excludeGlobs', show(status.config.excludeGlobs)),
           line('gitSnapshot', show(status.config.gitSnapshot)),
           status.config.gitSnapshot ? h('p', { style: { color: '#b7791f' } }, t('gitNote')) : null,
+        ) : null,
+        // 影子快照库与快照统计由 host 侧提供；字段可能缺失（host 未同步/未启用），
+        // 这里只做防御式展示：缺失时显示「未知/未启用」，不得抛错。
+        status ? h('section', { style: cardStyle },
+          h('h3', { style: { margin: '0 0 6px', fontSize: 14 } }, t('shadowStore')),
+          line(t('shadowEnabled'), shadow ? show(shadow.enabled) : t('unknownOrOff')),
+          line(t('shadowWorkspaceKey'), shadow ? show(shadow.workspaceKey) : t('unknownOrOff')),
+          line(t('shadowObjects'), shadow ? show(shadow.objects) : t('unknownOrOff')),
+          line(t('shadowRefs'), shadow ? show(shadow.refs) : t('unknownOrOff')),
+          // 自动排除与熔断都必须可见：它们意味着"审计覆盖面已被缩小/已停止尝试"
+          line(t('shadowAutoExcluded'), shadow ? show(shadow.autoExcluded) : t('unknownOrOff')),
+          line(t('shadowFused'), shadow ? show(shadow.fused) : t('unknownOrOff')),
+        ) : null,
+        status ? h('section', { style: cardStyle },
+          h('h3', { style: { margin: '0 0 6px', fontSize: 14 } }, t('snapshotStats')),
+          line(t('snapshotBoundaries'), stats ? show(stats.boundaries) : t('unknownOrOff')),
+          line(t('snapshotLastTurn'), stats ? show(stats.lastTurn) : t('unknownOrOff')),
+          line(t('snapshotLastStep'), stats ? show(stats.lastStep) : t('unknownOrOff')),
         ) : null,
         h(SettingsEditor, { settingsCall, t, onSaved: load }),
       )
@@ -619,6 +733,7 @@ window.__ModuleLoader__.load({
     exports.ChangedFilesPage = ChangedFilesPage
     exports.ChangedFilesView = ChangedFilesView
     exports.ChangedFilesSummary = ChangedFilesSummary
+    exports.AuditPage = AuditPage
     exports.rollbackDescriptors = rollbackDescriptors
     exports.parseRollbackRequest = parseRollbackRequest
     exports.dictionaries = { zh, en }

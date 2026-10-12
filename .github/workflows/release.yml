@@ -18,7 +18,8 @@ jobs:
       contents: write
       id-token: write
     concurrency:
-      group: versioned-release-${{ github.ref }}
+      # 所有版本 tag 共用组，避免不同 tag 同时查 registry 后交错更新 npm latest。
+      group: versioned-release-npm
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -28,9 +29,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          # 写入 .npmrc，把 NODE_AUTH_TOKEN 关联到公共 registry。
-          # 只写 URL，不写 token——token 一律走仓库 secret（硬约束：workflow 不得出现硬编码密钥）。
+          # 写入公共 registry 配置；发布认证由 GitHub OIDC 提供，不保存长期写令牌。
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Check npm supports Trusted Publishing
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          const version = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
+          const [major, minor, patch] = version.split('.').map(Number);
+          if (!Number.isInteger(major) || major < 11 ||
+              (major === 11 && (minor < 5 || (minor === 5 && patch < 1))))
+            throw new Error(`Trusted Publishing 要求 npm >=11.5.1，实际 ${version}`);
+          console.log(`npm ${version} 支持 Trusted Publishing`);
+          NODE
+
+      - name: Test npm publishing decisions without uploads
+        run: node scripts/test-publish-npm.mjs
 
       # 与 CI 一致的隔离测试依赖，不运行生命周期脚本。
       - name: Install test dependencies without lifecycle scripts

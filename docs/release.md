@@ -46,6 +46,8 @@ node scripts/prepare-release.mjs
   `make_latest: false`，重跑旧 tag 不会改变 GitHub 的 latest release。
 - npm：仅 `v<version>` 版本化发布会更新两个包的 `latest` dist-tag。发布脚本查询 registry，
   已发布版本会跳过；若任一包已有更高版本，则整组跳过，避免 latest 回退或两包版本失配。
+  不同版本 tag 共用 `versioned-release-npm` 并发组，不并行发布 npm。
+  GitHub 默认只保留一个待运行项；一次推送多个 tag 时，可能需要手动重跑被替换的待运行任务。
 - 防旧构建覆盖 GitHub latest：publish job 在发布前用 `gh api repos/<repo>/git/ref/heads/main` 比对
   当前构建的 commit；若 main 已有更新提交，则输出 `current=false` 并跳过发布，
   避免排队中的旧构建在新提交到达后覆盖 latest。
@@ -56,8 +58,11 @@ node scripts/prepare-release.mjs
   这些动作由维护者确认后执行）。
 - 推送 main 后，`ci.yml` 自动创建 `build-<sha12>` GitHub Release 并标为 latest；该流程不发布 npm。
 - npm 版本化发布使用 Trusted Publishing：在两个 npm 包的设置中分别把
-  `KouzakiUmi/dsh-guard` 仓库与 `.github/workflows/release.yml` 配为 Trusted Publisher。
+  `KouzakiUmi/dsh-guard` 仓库配为 Trusted Publisher；Workflow filename 只填 `release.yml`，
+  不填 `.github/workflows/` 路径，并允许直接执行 `npm publish`。发布 job 使用 GitHub `npm` environment；
+  若 Trusted Publisher 限制了 Environment name，该名称须为 `npm`，不要丢掉既有工作流的环境配置。
   `release.yml` 仅在 `v<version>` tag 与两包版本一致时申请 OIDC 并发布 npm，不需要保存长期写令牌。
+  Trusted Publishing 要求 Node.js ≥22.14.0、npm CLI ≥11.5.1；发布环境必须满足这两个下限。
 
 ## 故障处置
 

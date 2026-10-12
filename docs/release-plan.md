@@ -131,7 +131,7 @@ D:\dsh-guard\
 
 | 包 | 必需文件 |
 |---|---|
-| `dsh-audit-rollback` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/client.js`、`lib/ledger.js`、`scripts/audit-rollback.mjs` |
+| `dsh-audit-rollback` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/client.js`、`lib/config.js`、`lib/ledger.js`、`lib/snapshot.js`（阶段 B 新增）、`lib/boundary.js`（阶段 B 新增）、`lib/boundary-exec.js`（阶段 B 新增）、`lib/rollback-preview.js`、`lib/rollback-remote.js`、`scripts/audit-rollback.mjs` |
 | `dsh-auto-review-router` | `package.json`、`README.zh.md`、`cordis.patch.yml`、`lib/index.js`、`lib/client.js`、`lib/policy.js`、`lib/context.js` |
 
 - 复制为 `dist/<name>.tgz`（固定资产名，不带版本号，与参考实现一致）。
@@ -145,7 +145,7 @@ D:\dsh-guard\
 
 ```jsonc
 {
-  "private": true,                       // 保留：只发 GitHub Release，不 npm publish
+  "publishConfig": { "access": "public" }, // 两个插件包不得设 private:true；v* tag 同步 npm
   "repository": {
     "type": "git",
     "url": "git+https://github.com/KouzakiUmi/dsh-guard.git",

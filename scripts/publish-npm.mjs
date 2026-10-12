@@ -21,11 +21,35 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PKGS = ['dsh-audit-rollback', 'dsh-auto-review-router']
+
+// Windows 的 npm.cmd 不能直接 execFile；定位同一安装的 npm CLI，用 Node 执行，
+// 不经过 shell（避免路径空格、命令拼接注入与 Node 的 DEP0190 弃用警告）。
+function runNpm(args, options = {}) {
+  let command = 'npm'
+  let argv = args
+  if (process.platform === 'win32') {
+    const pathDirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean).map((dir) => dir.replace(/^"|"$/g, ''))
+    const candidates = [
+      ...(process.env.npm_execpath?.endsWith('npm-cli.js') ? [process.env.npm_execpath] : []),
+      join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+      ...pathDirs.flatMap((dir) => [join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), join(dir, '..', 'npm', 'bin', 'npm-cli.js')]),
+    ]
+    const cli = candidates.find((file) => existsSync(file))
+    if (!cli) throw new Error('找不到 Windows npm-cli.js；请使用带 npm 的 Node.js 安装或把 npm 安装目录加入 PATH')
+    command = process.execPath
+    argv = [cli, ...args]
+  }
+  return execFileSync(command, argv, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    ...options,
+  })
+}
 
 const log = (msg) => console.log(msg)
 const fail = (msg) => {
@@ -59,6 +83,7 @@ function compare(a, b) {
     const pn = /^\d+$/.test(p)
     const qn = /^\d+$/.test(q)
     if (pn && qn) return Number(p) < Number(q) ? -1 : 1
+    if (pn !== qn) return pn ? -1 : 1
     return p < q ? -1 : 1
   }
   return 0
@@ -67,14 +92,11 @@ function compare(a, b) {
 /** 查 registry 上已发布的版本列表。包不存在（首次发布）返回空数组。 */
 function publishedVersions(pkg) {
   try {
-    const out = execFileSync('npm', ['view', pkg, 'versions', '--json'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const out = runNpm(['view', pkg, 'versions', '--json', '--registry=https://registry.npmjs.org'])
     const parsed = JSON.parse(out)
     return Array.isArray(parsed) ? parsed : [parsed]
   } catch (error) {
-    const detail = [error?.stderr, error?.message].filter(Boolean).join('\n')
+    const detail = [error?.stdout, error?.stderr, error?.message].filter(Boolean).join('\n')
     // npm CLI 对缺包返回退出码 1；只有明确的 registry 404 才能视作首次发布。
     // 网络、鉴权、限流等也会退出 1，不能误判成「包不存在」。
     if (error?.code === 'E404' || /(?:npm error code E404|E404 Not Found|404 Not Found)/i.test(detail)) return []
@@ -101,15 +123,15 @@ try {
   // ---- 决策：逐包判断是否需要发布 ----
   for (const pkg of PKGS) {
     const published = publishedVersions(pkg)
-    if (published.includes(current)) decisions.push({ pkg, publish: false, why: `版本 ${current} 已在 registry，跳过` })
-    else {
-      const higher = published.filter((v) => compare(v, current) > 0)
-      if (higher.length > 0) {
-        const top = higher.sort(compare).at(-1)
-        decisions.push({ pkg, publish: false, why: `registry 已有更高版本 ${top}，拒绝回退 latest` })
-      } else {
-        decisions.push({ pkg, publish: true, why: published.length === 0 ? 'registry 尚无此包，首次发布' : `未找到 ${current}，将发布` })
-      }
+    // 即使当前版本已经存在，也要先看更高版本，不能在部分补发时绕过整组防回退。
+    const higher = published.filter((v) => compare(v, current) > 0)
+    if (higher.length > 0) {
+      const top = higher.sort(compare).at(-1)
+      decisions.push({ pkg, publish: false, why: `registry 已有更高版本 ${top}，拒绝回退 latest` })
+    } else if (published.includes(current)) {
+      decisions.push({ pkg, publish: false, why: `版本 ${current} 已在 registry，跳过` })
+    } else {
+      decisions.push({ pkg, publish: true, why: published.length === 0 ? 'registry 尚无此包，首次发布' : `未找到 ${current}，将发布` })
     }
   }
 } catch (error) {
@@ -156,9 +178,7 @@ for (const { pkg } of todo) {
   try {
     // npm publish 默认将版本标为 latest；不显式传 --tag，避免触发 OIDC 的
     // 单独 dist-tag 管理权限与更高 CLI 版本要求。
-    const out = execFileSync('npm', ['publish', asset], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const out = runNpm(['publish', asset, '--registry=https://registry.npmjs.org'], {
       env: { ...process.env, ...(token ? { NODE_AUTH_TOKEN: token } : {}) },
     })
     if (out.trim()) log(out.trim())

@@ -1,7 +1,7 @@
 {
   "name": "dsh-audit-rollback",
   "displayName": "审计与回滚（audit ledger + rollback）",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Persistent audit ledger + precise rollback for DeepSeek Harness file-tool edits: capture pre-edit bytes into a content-addressed store per turn, roll back offline via a standalone CLI.",
   "type": "module",
   "engines": {
@@ -24,6 +24,9 @@
     "lib/index.js",
     "lib/client.js",
     "lib/ledger.js",
+    "lib/snapshot.js",
+    "lib/boundary.js",
+    "lib/boundary-exec.js",
     "lib/config.js",
     "lib/rollback-preview.js",
     "lib/rollback-remote.js",
@@ -32,7 +35,7 @@
     "README.zh.md"
   ],
   "scripts": {
-    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/settings-client.mjs && node test/settings-integration.mjs && node test/rollback-integration.mjs && node test/rollback-preview.mjs && node test/rollback-ui.mjs && node test/security-regressions.mjs"
+    "test": "node test/selftest.mjs && node test/plugin-smoke.mjs && node test/status.mjs && node test/navigation.mjs && node test/settings-client.mjs && node test/settings-integration.mjs && node test/rollback-integration.mjs && node test/rollback-preview.mjs && node test/rollback-ui.mjs && node test/security-regressions.mjs && node test/snapshot.mjs && node test/snapshot-edge.mjs && node test/snapshot-safety.mjs && node test/snapshot-wiring.mjs && node test/boundary.mjs && node test/boundary-exec.mjs && node test/boundary-exec-safety.mjs"
   },
   "repository": {
     "type": "git",

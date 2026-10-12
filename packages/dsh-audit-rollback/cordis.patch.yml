@@ -5,17 +5,29 @@
 # $DSH_HOME/audit-rollback → ~/.dsh/audit-rollback）；gitSnapshot 关闭。
 #
 # 注意 Loader 对同一个 id 的 config 是**整体替换**：profile 里写 config 时必须把
-# 下面这些字段全部写全，否则未写的字段会回落到插件默认值。
+# 16 个可编辑字段全部写全（逐字段与代码默认值一致），漏写的字段会回落到插件
+# 代码默认值——因此这里必须写全，不能只写差异项。stateDir 保持只读、不入本
+# patch（缺省回落，见上）。
 #
-# 字段：
-#   stateDir        字符串     状态目录（展开 ~；缺省见上）
-#   captureTools    [工具名…]  要捕获编辑前内容的工具（默认 write/edit/str_replace_editor）
-#   captureMaxBytes 整数       单文件捕获上限（默认 2097152 = 2 MiB；超限记 hash:null + note）
-#   argsMaxBytes    整数       call 条目 argsPreview 截断上限（默认 4096 UTF-8 字节）
-#   logCalls        true       是否记录每次工具调用的 call 条目
-#   excludeGlobs    [glob…]    命中即不捕获：含通配符按 glob（* / ** / ?）匹配，
-#                              不含通配符按路径片段匹配（如 /node_modules/ 命中其下任意文件）
-#   gitSnapshot     false      未实现且设置页不可编辑；仅兼容旧 profile true 的告警
+# 字段（代码默认见 lib/config.js）：
+#   stateDir                  字符串     状态目录（只读；不入本 patch，缺省见上）
+#   captureTools              [工具名…]  要捕获编辑前内容的工具（默认 write/edit/str_replace_editor）
+#   captureMaxBytes           整数       单文件捕获上限（默认 2097152 = 2 MiB；超限记 hash:null + note）
+#   argsMaxBytes              整数       call 条目 argsPreview 截断上限（默认 4096 UTF-8 字节）
+#   logCalls                  true       是否记录每次工具调用的 call 条目
+#   excludeGlobs              [glob…]    命中即不捕获：含通配符按 glob（* / ** / ?）匹配，
+#                                        不含通配符按路径片段匹配（如 /node_modules/ 命中其下任意文件）
+#   gitSnapshot               false      阶段 B 总开关（默认 false；false 时行为与阶段 A 完全一致）
+#   snapshotMode               per-step   快照粒度：per-step 每步前后各一次 / per-turn 每轮前后各一次
+#   snapshotExcludeGlobs      [glob…]    快照排除规则（默认含 /audit-rollback/，语义同 excludeGlobs）
+#   snapshotIgnorePolicy      git        忽略策略：git 尊重 .gitignore / force 强制纳入
+#   snapshotMaxFiles          50000      快照工作区预算：文件数上限（超预算默认拒绝）
+#   snapshotMaxBytes          536870912  快照工作区预算：字节数上限（默认 512 MiB）
+#   snapshotScanMs             5000       快照前盘点最长耗时（毫秒）；未扫完也必须拒绝
+#   snapshotTimeoutMs         10000      单次快照 git 子进程超时（毫秒），超时即降级
+#   snapshotAutoExcludeOversized false    超预算时是否自动排除 oversized 顶层项后重试（默认不自动排除）
+#   rollbackOnAbort           prompt     轮次被中断后的联动：off 只记录 / prompt 提示 / auto 自动回滚
+#   snapshotRetentionDays     14         影子快照保留天数（非负；gc --keep-days 默认值）
 - insert:
     - id: audit-rollback
       name: dsh-audit-rollback
@@ -26,3 +38,13 @@
         logCalls: true
         excludeGlobs: ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/']
         gitSnapshot: false
+        snapshotMode: 'per-step'
+        snapshotExcludeGlobs: ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/', '/audit-rollback/']
+        snapshotIgnorePolicy: 'git'
+        snapshotMaxFiles: 50000
+        snapshotMaxBytes: 536870912
+        snapshotScanMs: 5000
+        snapshotTimeoutMs: 10000
+        snapshotAutoExcludeOversized: false
+        rollbackOnAbort: 'prompt'
+        snapshotRetentionDays: 14

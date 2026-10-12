@@ -6,8 +6,8 @@ DeepSeek Harness 的文件审计、回滚和自动审批工具集。两个插件
 
 | 插件 | 功能 | 包版本 |
 | --- | --- | --- |
-| [dsh-audit-rollback](packages/dsh-audit-rollback/README.zh.md) | 文件前后像捕获、持久审计、会话内恢复、离线 CLI 回滚 | 0.3.3 |
-| [dsh-auto-review-router](packages/dsh-auto-review-router/README.zh.md) | 可配置审查模型、人工审批回退、目录授权记忆、审批历史 | 0.3.3 |
+| [dsh-audit-rollback](packages/dsh-audit-rollback/README.zh.md) | 文件前后像捕获、持久审计、会话内恢复、可选影子快照与边界 CLI 回滚 | 0.4.0 |
+| [dsh-auto-review-router](packages/dsh-auto-review-router/README.zh.md) | 可配置审查模型、人工审批回退、目录授权记忆、审批历史 | 0.4.0 |
 
 验证基线为 DSH `0.2.1-alpha.1`，Node.js 要求为 `^22.19.0 || >=24.0.0`。依赖兼容范围以各包 manifest 为准，声明兼容范围不代表所有版本均经过运行验证。
 
@@ -16,8 +16,8 @@ DeepSeek Harness 的文件审计、回滚和自动审批工具集。两个插件
 从 npm 安装对应插件包，再通过目标 profile 的官方插件管理入口添加该包。也可从 [GitHub Releases](https://github.com/KouzakiUmi/dsh-guard/releases) 获取 tarball 离线安装。
 
 ```sh
-npm pack dsh-audit-rollback@0.3.3
-npm pack dsh-auto-review-router@0.3.3
+npm pack dsh-audit-rollback@0.4.0
+npm pack dsh-auto-review-router@0.4.0
 ```
 
 `npm pack` 会下载包到当前目录，随后把 tarball 路径传给 DSH 插件管理命令。桌面与非桌面 profile 的安装边界见下文。
@@ -38,7 +38,7 @@ dsh plugin --profile <profile-name> add <tarball-path>
 
 在「设置 → 内置插件 → 审计与回滚」配置捕获工具、大小上限和排除规则。会话「已修改文件」页签提供差异预览和二次确认恢复。CLI 按会话与轮次回滚，默认生成计划，指定 `--apply` 才修改目标文件。
 
-捕获仅覆盖文件工具显式目标路径，不覆盖 shell、其他插件和人工编辑，不能作为完整工作区备份。GUI 与 CLI 的恢复条件不同，详见包文档。
+默认捕获仅覆盖文件工具显式目标路径，不覆盖 shell、其他插件和人工编辑。0.4.0 新增可选 `gitSnapshot`（默认关闭）：开启后在步/轮边界写影子 Git 快照，CLI `undo-to` / `redo` 只操作归属路径；显式排除、忽略规则和预算仍会缩小覆盖面，不能作为完整工作区备份。边界 GUI 与停止联动尚未实现，现有 GUI 与 CLI 的恢复条件不同，详见包文档。
 
 ### 自动审批
 

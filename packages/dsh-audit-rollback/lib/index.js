@@ -32,6 +32,9 @@ import {
 import { readConfigValues } from './config.js'
 import { createRollbackApi, DEFAULT_CAPTURE_TOOLS } from './rollback-preview.js'
 import { rollbackDescriptors, rollbackMethods } from './rollback-remote.js'
+// 阶段 B：边界快照与归属（纯 node 库层，不依赖 Cordis）
+import { TURN_LEVEL_STEP, captureBoundary, recordAttribution, resolveRootFromLedger } from './boundary.js'
+import { shadowStats, workspaceKey } from './snapshot.js'
 export { Config } from './config.js'
 
 export const name = 'audit-rollback'
@@ -48,6 +51,19 @@ const DEFAULT_ARGS_MAX_BYTES = 4096
 /** 默认排除片段（契约 §2.1 写定，与 cordis.patch.yml 默认值一致）：依赖目录 / 版本库 / 记忆目录 / 缓存目录。 */
 const DEFAULT_EXCLUDE_GLOBS = ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/']
 
+/** 阶段 B 影子库默认值（契约 §10.4；必须与 config.js 的 Schema 默认值逐字段一致）。 */
+const DEFAULT_SNAPSHOT_EXCLUDE_GLOBS = ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/', '/audit-rollback/']
+const DEFAULT_SNAPSHOT_MAX_FILES = 50000
+const DEFAULT_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024 // 512 MiB
+const DEFAULT_SNAPSHOT_SCAN_MS = 5000
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 10000
+const DEFAULT_SNAPSHOT_RETENTION_DAYS = 14
+
+/** 阶段 B 的枚举取值（规范化与设置页校验必须一致）。 */
+const SNAPSHOT_MODES = ['per-step', 'per-turn']
+const SNAPSHOT_IGNORE_POLICIES = ['git', 'force']
+const ROLLBACK_ON_ABORT_MODES = ['off', 'prompt', 'auto']
+
 function asNames(value) {
   if (!Array.isArray(value)) return []
   return value.filter((item) => typeof item === 'string' && item.length > 0)
@@ -56,6 +72,17 @@ function asNames(value) {
 function asPositiveInt(value, fallback) {
   const num = Number(value)
   return Number.isFinite(num) && num > 0 ? Math.floor(num) : fallback
+}
+
+/** 非负整数（`snapshotRetentionDays` 允许 0＝不保留历史边界）。 */
+function asNonNegativeInt(value, fallback) {
+  const num = Number(value)
+  return Number.isFinite(num) && num >= 0 ? Math.floor(num) : fallback
+}
+
+/** 枚举取值校验：不在集合内一律回落默认（非法配置不抛错，与既有风格一致）。 */
+function asEnum(value, allowed, fallback) {
+  return typeof value === 'string' && allowed.includes(value) ? value : fallback
 }
 
 /** 把 profile 传入的原始 config 规范化为内部结构（非法字段忽略，不抛错）。 */
@@ -70,6 +97,19 @@ export function normalizeConfig(raw) {
     logCalls: cfg.logCalls !== false,
     excludeGlobs: Array.isArray(cfg.excludeGlobs) ? asNames(cfg.excludeGlobs) : DEFAULT_EXCLUDE_GLOBS.slice(),
     gitSnapshot: cfg.gitSnapshot === true,
+    // ---- 阶段 B（契约 §10.4 / §10.8）。gitSnapshot 为 false 时这些值不产生任何行为。----
+    snapshotMode: asEnum(cfg.snapshotMode, SNAPSHOT_MODES, 'per-step'),
+    snapshotExcludeGlobs: Array.isArray(cfg.snapshotExcludeGlobs)
+      ? asNames(cfg.snapshotExcludeGlobs)
+      : DEFAULT_SNAPSHOT_EXCLUDE_GLOBS.slice(),
+    snapshotIgnorePolicy: asEnum(cfg.snapshotIgnorePolicy, SNAPSHOT_IGNORE_POLICIES, 'git'),
+    snapshotMaxFiles: asPositiveInt(cfg.snapshotMaxFiles, DEFAULT_SNAPSHOT_MAX_FILES),
+    snapshotMaxBytes: asPositiveInt(cfg.snapshotMaxBytes, DEFAULT_SNAPSHOT_MAX_BYTES),
+    snapshotScanMs: asPositiveInt(cfg.snapshotScanMs, DEFAULT_SNAPSHOT_SCAN_MS),
+    snapshotTimeoutMs: asPositiveInt(cfg.snapshotTimeoutMs, DEFAULT_SNAPSHOT_TIMEOUT_MS),
+    snapshotAutoExcludeOversized: cfg.snapshotAutoExcludeOversized === true,
+    rollbackOnAbort: asEnum(cfg.rollbackOnAbort, ROLLBACK_ON_ABORT_MODES, 'prompt'),
+    snapshotRetentionDays: asNonNegativeInt(cfg.snapshotRetentionDays, DEFAULT_SNAPSHOT_RETENTION_DAYS),
   }
 }
 
@@ -94,7 +134,7 @@ export function identifyTarget(argsValue, cwd) {
 /** 设置页「最近捕获」条数。只读查询固定取这个窗口，避免无参 remote 再传 limit。 */
 export const RECENT_CAPTURE_LIMIT = 8
 
-const LEDGER_KINDS = ['turn/start', 'call', 'capture', 'turn/end', 'rollback', 'note']
+const LEDGER_KINDS = ['turn/start', 'call', 'capture', 'turn/end', 'rollback', 'note', 'snapshot', 'attribution', 'abort']
 
 /** 每个 apply 实例的生效配置与初始化结果。假 ctx 测试与设置页读的是同一份。 */
 const runtimeByCtx = new WeakMap()
@@ -123,6 +163,38 @@ function collectAuditStatus(config, live) {
   }
   const captures = summarizeCaptures(entries)
   const objects = readObjectStats(stateDir)
+
+  // ---- 阶段 B 概览（只读）----
+  // 被审计根从账本里的 root 字段还原（阶段 B 条目才带；旧账本为 null → 影子库显示为未知）。
+  const shadowRootPath = resolveRootFromLedger(entries, {})
+  const shadow = {
+    enabled: config.gitSnapshot === true,
+    workspaceKey: shadowRootPath === null ? null : workspaceKey(shadowRootPath),
+    objects: 0,
+    refs: 0,
+    // 自动排除的顶层项（最近一次）与熔断原因：都必须在设置页可见，不许静默（§10.4 第 6 条）。
+    autoExcluded: Array.isArray(live?.snapshotRuntime?.lastAutoExcluded) ? live.snapshotRuntime.lastAutoExcluded.slice() : [],
+    fused: live?.snapshotRuntime?.fused === null || live?.snapshotRuntime?.fused === undefined
+      ? null
+      : live.snapshotRuntime.fused.reason,
+  }
+  if (shadowRootPath !== null) {
+    try {
+      const stats = shadowStats(stateDir, shadowRootPath)
+      shadow.objects = stats.objects
+      shadow.refs = stats.refs
+    } catch {
+      /* 影子库不可读时保持 0，不阻断状态查询 */
+    }
+  }
+  const boundaryEntries = entries.filter((entry) => entry && entry.kind === 'snapshot')
+  const lastBoundary = boundaryEntries.length > 0 ? boundaryEntries[boundaryEntries.length - 1] : null
+  const snapshotStats = {
+    boundaries: boundaryEntries.length,
+    lastTurn: lastBoundary !== null && typeof lastBoundary.turn === 'number' ? lastBoundary.turn : null,
+    lastStep: lastBoundary !== null && typeof lastBoundary.step === 'number' ? lastBoundary.step : null,
+  }
+
   return {
     plugin: 'dsh-audit-rollback',
     state: {
@@ -147,7 +219,20 @@ function collectAuditStatus(config, live) {
       logCalls: config.logCalls,
       excludeGlobs: config.excludeGlobs.slice(),
       gitSnapshot: config.gitSnapshot,
+      // 阶段 B 字段一并回传：设置页与「描述符一致性」测试读的是同一份。
+      snapshotMode: config.snapshotMode,
+      snapshotExcludeGlobs: config.snapshotExcludeGlobs.slice(),
+      snapshotIgnorePolicy: config.snapshotIgnorePolicy,
+      snapshotMaxFiles: config.snapshotMaxFiles,
+      snapshotMaxBytes: config.snapshotMaxBytes,
+      snapshotScanMs: config.snapshotScanMs,
+      snapshotTimeoutMs: config.snapshotTimeoutMs,
+      snapshotAutoExcludeOversized: config.snapshotAutoExcludeOversized,
+      rollbackOnAbort: config.rollbackOnAbort,
+      snapshotRetentionDays: config.snapshotRetentionDays,
     },
+    shadow,
+    snapshotStats,
   }
 }
 
@@ -440,26 +525,31 @@ export function apply(ctx, rawConfig) {
   // Ordinary stateDir stays tied to this instance. Volatile fields are dereferenced at
   // each new turn; an in-flight turn never changes policy or object-store location.
   const readConfig = () => ({ ...normalizeConfig(rawConfig), stateDir: config.stateDir })
-  runtimeByCtx.set(ctx, { readConfig, stateReady, initError })
+  /** 阶段 B 运行态：熔断标志与最近一次自动排除（供 status 只读展示）。 */
+  const snapshotRuntime = { fused: null, lastAutoExcluded: [] }
+  runtimeByCtx.set(ctx, { readConfig, stateReady, initError, snapshotRuntime })
   if (typeof ctx.inject === 'function') {
     ctx.inject(['settings'], (scope) => scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber)))
   }
   exposeAuditRemote(ctx)
 
-  // 加载 banner（契约第 6.1 条）：stateDir、captureTools、captureMaxBytes、gitSnapshot 状态
+  // 加载 banner（契约第 6.1 条）
   ctx.logger.info(
     `[audit-rollback] 已加载 stateDir=${config.stateDir} ` +
       `captureTools=[${config.captureTools.join(',')}] ` +
       `captureMaxBytes=${config.captureMaxBytes} ` +
-      `gitSnapshot=${config.gitSnapshot ? 'true(未实现)' : 'false'}`,
+      `gitSnapshot=${config.gitSnapshot ? `true(${config.snapshotMode})` : 'false'}`,
   )
 
-  // gitSnapshot 只留开关不实现（契约第 1/6.7 条）：warn + 账本 note，不得静默无效
-  if (config.gitSnapshot) {
-    ctx.logger.warn('[audit-rollback] gitSnapshot=true：影子 git 快照本阶段未实现，仅记录本说明，行为不变')
-    if (stateReady) {
-      appendEntry(config.stateDir, { kind: 'note', text: 'gitSnapshot 未实现：开关已打开但影子 git 快照本阶段不生效' })
-    }
+  // 阶段 B（契约 §10.4）：只有 gitSnapshot=true 才启用影子库边界快照。
+  // **默认 false 时不触碰任何 git、不注册任何新行为**——这是 B2b 的回归红线。
+  if (config.gitSnapshot === true) {
+    ctx.logger.info(
+      `[audit-rollback] 影子库边界快照已启用：mode=${config.snapshotMode} policy=${config.snapshotIgnorePolicy} ` +
+        `budget=${config.snapshotMaxFiles}文件/${Math.round(config.snapshotMaxBytes / 1048576)}MiB ` +
+        `scanMs=${config.snapshotScanMs} timeoutMs=${config.snapshotTimeoutMs} ` +
+        `autoExcludeOversized=${config.snapshotAutoExcludeOversized ? 'true' : 'false'}`,
+    )
   }
 
   // 每个会话的轮次状态：{ turn: 当前轮号(未知 -1), state: createTurnState() | null }
@@ -555,6 +645,154 @@ export function apply(ctx, rawConfig) {
     return captured
   }
 
+  // ---- 阶段 B：影子库边界快照（契约 §10.4 / §10.6）----------------------------
+  //
+  // 串行队列：所有影子库操作排队执行，避免同一影子库的并发索引冲突。
+  // （契约 §10.4 第 5 条；参考 Roo Code 的做法——"同一流式操作内不重复 checkpoint"。）
+  // 任务内部自带 try/catch，因此链条不会被单个失败污染。
+  let snapshotChain = Promise.resolve()
+  let snapshotDisposed = false
+  function enqueueSnapshot(task) {
+    snapshotChain = snapshotChain.then(task, task)
+    return snapshotChain
+  }
+
+  /**
+   * 待配对的 start 快照。**键必须含 (turn, step)**：只按 sessionId 配对时，
+   * 交错边界或跨轮残留会让 end 配到别人的 start，使归属的 `from` 与它声明的 turn/step 脱节
+   * ——而归属是回滚的唯一依据（2026-10-11 独立复核实证：乱序 step 事件会错配且丢条目）。
+   */
+  const pendingBoundaries = new Map()
+  const boundaryKeyOf = (sessionId, turn, step) => `${sessionId}|${turn}|${step}`
+  /** 该会话所有未配对的 start 键（用于 turn/end 与 session/disposed 清理残留）。 */
+  const pendingKeysOf = (sessionId) => {
+    const prefix = `${sessionId}|`
+    return [...pendingBoundaries.keys()].filter((key) => key.startsWith(prefix))
+  }
+
+  /** 环境性失败（重试也不会好）一律熔断，避免每个边界都重试并重复告警（契约 §10.4 第 1 条）。 */
+  const FUSING_REASONS = new Set([
+    'GIT_UNAVAILABLE', 'INIT_FAILED', 'WORKTREE_MISMATCH', 'SCAN_UNREADABLE',
+    'TIMEOUT', 'OVER_BUDGET', 'SCAN_INCOMPLETE',
+  ])
+
+  /** 快照延迟超过这个毫秒数时，说明"事件时刻"与"真正捕获时刻"之间已隔了文件改动。 */
+  const SNAPSHOT_LAG_WARN_MS = 250
+
+  /** 由生效配置构造影子库调用参数。 */
+  function snapshotCallOptions(cfg, root, sessionId) {
+    return {
+      stateDir: cfg.stateDir,
+      root,
+      session: sessionId,
+      excludeGlobs: cfg.snapshotExcludeGlobs,
+      ignorePolicy: cfg.snapshotIgnorePolicy,
+      budget: { maxFiles: cfg.snapshotMaxFiles, maxBytes: cfg.snapshotMaxBytes, scanMs: cfg.snapshotScanMs },
+      timeoutMs: cfg.snapshotTimeoutMs,
+      autoExcludeOversized: cfg.snapshotAutoExcludeOversized === true,
+    }
+  }
+
+  /** 自动排除必须记账（契约 §10.4 第 6 条）；只在集合变化时写 note，避免刷屏。 */
+  function noteAutoExcluded(cfg, result) {
+    const excluded = Array.isArray(result.autoExcluded) ? result.autoExcluded : []
+    if (excluded.length === 0) return
+    const signature = excluded.join(',')
+    if (snapshotRuntime.lastAutoExcluded.join(',') === signature) return
+    snapshotRuntime.lastAutoExcluded = excluded.slice()
+    ctx.logger.warn(`[audit-rollback] 快照自动排除 ${excluded.length} 个超限顶层项：${signature}（审计覆盖面已缩小）`)
+    if (stateReady) {
+      appendEntry(cfg.stateDir, { kind: 'note', text: `快照自动排除超限顶层项：${signature}` })
+    }
+  }
+
+  /** 环境性失败一律熔断：写一次 note、告警一次，此后本实例不再尝试（契约 §10.4 第 1 条）。 */
+  function fuseIfEnvironmental(cfg, reason, where) {
+    if (snapshotRuntime.fused !== null) return
+    ctx.logger.warn(`[audit-rollback] 边界快照未生效 ${where}: ${reason}`)
+    if (FUSING_REASONS.has(reason) !== true) return
+    snapshotRuntime.fused = { reason }
+    ctx.logger.warn(`[audit-rollback] 影子库快照已降级并熔断（${reason}）：本实例后续不再尝试，直到插件重载`)
+    if (stateReady) {
+      appendEntry(cfg.stateDir, { kind: 'note', text: `影子库快照熔断：${reason}（本实例后续不再尝试）` })
+    }
+  }
+
+  /**
+   * 在边界写快照，并在 end 时把归属路径写进账本。
+   *
+   * 三条硬约束（都在 2026-10-11 的独立复核里被实证过缺一即错）：
+   *   1. start/end **按 (session, turn, step) 配对**——只按会话配对时，交错事件会让 end 配到别人的 start，
+   *      使归属的 `from` 与它声明的 turn/step 脱节（而归属是回滚的唯一依据）；
+   *   2. start 失败时**不写归属**——否则 end 侧会把整棵树当成"新增"，产出垃圾归属集合；
+   *   3. 失败只 warn / note，绝不抛出：快照不得影响轮次推进（契约 §10.10）。
+   */
+  function scheduleBoundarySnapshot({ cfg, root, sessionId, turn, step, phase, eventAt }) {
+    enqueueSnapshot(async () => {
+      if (snapshotDisposed || snapshotRuntime.fused !== null) return
+      const key = boundaryKeyOf(sessionId, turn, step)
+      const lagMs = Number.isFinite(eventAt) ? Math.max(0, Date.now() - eventAt) : undefined
+      try {
+        const options = snapshotCallOptions(cfg, root, sessionId)
+        if (phase === 'start') {
+          const started = await captureBoundary({ ...options, turn, step, phase: 'start', lagMs })
+          noteAutoExcluded(cfg, started)
+          if (started.ledgerOk !== true) ctx.logger.warn(`[audit-rollback] 开始快照审计写入失败：${started.ledgerError}`)
+          if (started.ok === true) {
+            pendingBoundaries.set(key, { turn, step, tree: started.tree })
+          } else {
+            pendingBoundaries.delete(key)
+            fuseIfEnvironmental(cfg, started.reason, `${sessionId}/${turn}#${step}`)
+          }
+          return
+        }
+        // end：只认同一 (turn, step) 的 start；不匹配就只留 end 快照，不写归属
+        const pending = pendingBoundaries.get(key)
+        pendingBoundaries.delete(key)
+        const ended = await captureBoundary({ ...options, turn, step, phase: 'end', lagMs })
+        noteAutoExcluded(cfg, ended)
+        if (ended.ledgerOk !== true) ctx.logger.warn(`[audit-rollback] 结束快照审计写入失败：${ended.ledgerError}`)
+        if (ended.ok !== true) {
+          fuseIfEnvironmental(cfg, ended.reason, `${sessionId}/${turn}#${step}`)
+          return
+        }
+        if (pending === undefined || typeof pending.tree !== 'string') return
+
+        const attributed = await recordAttribution({ ...options, turn, step, from: pending.tree, to: ended.tree })
+        if (attributed.ledgerOk !== true) ctx.logger.warn(`[audit-rollback] 归属审计写入失败：${attributed.ledgerError}`)
+        if (attributed.ok !== true) {
+          ctx.logger.warn(`[audit-rollback] 归属计算失败 ${sessionId}/${turn}#${step}: ${attributed.reason}`)
+          return
+        }
+        // 追拍窗口过大时 start 树可能已在改动之后才捕获 → 这一步的归属不可信，必须记账而不是静默
+        if (attributed.paths.length === 0 && Number.isFinite(lagMs) && lagMs > SNAPSHOT_LAG_WARN_MS && stateReady) {
+          appendEntry(cfg.stateDir, {
+            kind: 'note',
+            text: `边界快照延迟 ${lagMs}ms（阈值 ${SNAPSHOT_LAG_WARN_MS}ms）：turn ${turn} step ${step} 的归属可能不完整（start 树可能在文件改动之后才捕获）`,
+          })
+        }
+      } catch (error) {
+        ctx.logger.warn(`[audit-rollback] 边界快照异常: ${error && error.message ? error.message : error}`)
+      }
+    })
+  }
+
+  /**
+   * 事件 → 边界快照的唯一入口：按 `snapshotMode` 过滤事件层级。
+   * `step === TURN_LEVEL_STEP` 表示轮级事件；per-step 模式只认步级，per-turn 只认轮级。
+   */
+  function scheduleShadowBoundary({ cfg, session, sessionId, turn, step, phase }) {
+    if (cfg.gitSnapshot !== true || stateReady !== true) return
+    if (snapshotRuntime.fused !== null) return // 已熔断：不再重试、不再重复告警
+    const isTurnLevel = step === TURN_LEVEL_STEP
+    if ((cfg.snapshotMode === 'per-step') === isTurnLevel) return
+    const root = cwdOf(session)
+    if (typeof root !== 'string' || root.length === 0) return
+    // 本函数在事件处理器里**同步**调用，因此这里的时刻即"事件时刻"，
+    // 用于度量"事件 → 真正捕获"的延迟（滞后过大说明 start 树可能失真）。
+    scheduleBoundarySnapshot({ cfg, root, sessionId, turn: turn >= 0 ? turn : -1, step, phase, eventAt: Date.now() })
+  }
+
   // turn/start：记条目并初始化本轮内存态；turn/end：补 after、记账、清轮态
   const offSessionEvent = ctx.on('session/event', (session, event) => {
     try {
@@ -567,7 +805,36 @@ export function apply(ctx, rawConfig) {
         slot.state = createTurnState()
         slot.config = readConfig()
         appendEntry(slot.config.stateDir, { kind: 'turn/start', session: id, turn, cwd: cwdOf(session) ?? '' })
+        scheduleShadowBoundary({ cfg: slot.config, session, sessionId: id, turn, step: TURN_LEVEL_STEP, phase: 'start' })
+      } else if (event.type === 'step/start' || event.type === 'step/end') {
+        // 阶段 B：步级边界（只有 per-step 模式会真的落快照，由 scheduleShadowBoundary 判定）
+        const step = event.data && typeof event.data.step === 'number' ? event.data.step : TURN_LEVEL_STEP
+        scheduleShadowBoundary({
+          cfg: slot.state !== null ? slot.config : readConfig(),
+          session,
+          sessionId: id,
+          turn: turn >= 0 ? turn : slot.turn,
+          step,
+          phase: event.type === 'step/start' ? 'start' : 'end',
+        })
       } else if (event.type === 'turn/end') {
+        scheduleShadowBoundary({
+          cfg: slot.state !== null ? slot.config : readConfig(),
+          session,
+          sessionId: id,
+          turn: turn >= 0 ? turn : slot.turn,
+          step: TURN_LEVEL_STEP,
+          phase: 'end',
+        })
+        // 轮结束：清掉本会话**该轮**所有未配对的 start，防止跨轮残留被后来的 end 误配
+        const endingTurn = turn >= 0 ? turn : slot.turn
+        if (endingTurn >= 0) {
+          // 必须排在 end 捕获与归属之后；同步清理会提前删掉已完成的 start。
+          enqueueSnapshot(() => {
+            const prefix = `${id}|${endingTurn}|`
+            for (const key of pendingKeysOf(id)) if (key.startsWith(prefix)) pendingBoundaries.delete(key)
+          })
+        }
         if (slot.state !== null) {
           captureAfterOnce(id, slot)
           appendEntry(slot.config.stateDir, {
@@ -597,7 +864,12 @@ export function apply(ctx, rawConfig) {
   })
 
   const offDisposed = ctx.on('session/disposed', (session) => {
-    sessions.delete(sessionIdOf(session))
+    const id = sessionIdOf(session)
+    // 会话销毁时同清未配对的 start 残留（否则后续 end 可能配到已消失会话的树）
+    enqueueSnapshot(() => {
+      for (const key of pendingKeysOf(id)) pendingBoundaries.delete(key)
+    })
+    sessions.delete(id)
   })
 
   // tools/pre-execute：记 call + 捕获 before；绝不能改变调用结果（契约第 5.2 节）
@@ -655,10 +927,14 @@ export function apply(ctx, rawConfig) {
   )
 
   // 插件卸载时摘掉全部监听（契约第 5.1 节：ctx.effect 清理）
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
+    snapshotDisposed = true
     offSessionEvent()
     offDisposed()
     offPreExecute()
+    // 已在运行的子进程有超时；等待其结束，排队中尚未开始的快照不再执行。
+    await snapshotChain
+    pendingBoundaries.clear()
     sessions.clear()
   })
 }

@@ -57,9 +57,20 @@ try {
   assert.ok(first)
   assert.equal(first.applies, 'live')
   assert.equal(first.autoGenerate, false)
-  assert.deepEqual(Object.keys(first.schema.refs[first.schema.uid].dict).sort(), ['argsMaxBytes', 'captureMaxBytes', 'captureTools', 'excludeGlobs', 'logCalls'].sort())
+  // 阶段 B 契约：可编辑字段面扩为 16 个（stateDir 仍只读、gitSnapshot 转为可编辑）。
+  assert.deepEqual(Object.keys(first.schema.refs[first.schema.uid].dict).sort(), [
+    'argsMaxBytes', 'captureMaxBytes', 'captureTools', 'excludeGlobs', 'gitSnapshot', 'logCalls',
+    'rollbackOnAbort', 'snapshotAutoExcludeOversized', 'snapshotExcludeGlobs', 'snapshotIgnorePolicy',
+    'snapshotMaxBytes', 'snapshotMaxFiles', 'snapshotMode', 'snapshotRetentionDays', 'snapshotScanMs', 'snapshotTimeoutMs',
+  ].sort())
   assert.equal(typeof fiber.config.captureMaxBytes.get, 'function')
-  console.log('通过 real Loader Config schema / volatile form / stateDir & gitSnapshot read-only')
+  // 未写入 patch 的新字段必须回落到代码默认值（整体替换语义的另一面）。
+  assert.equal(fiber.config.snapshotMode.get(), 'per-step')
+  assert.equal(fiber.config.snapshotMaxFiles.get(), 50000)
+  assert.equal(fiber.config.snapshotMaxBytes.get(), 536870912)
+  assert.equal(fiber.config.snapshotRetentionDays.get(), 14)
+  assert.equal(fiber.config.rollbackOnAbort.get(), 'prompt')
+  console.log('通过 real Loader Config schema / volatile form / 16 editable fields / stateDir read-only / defaults filled')
 
   const session = { id: 'integration', header: { cwd: rootDir } }
   const file = join(rootDir, 'target.txt')
@@ -95,10 +106,25 @@ try {
   await assert.rejects(ctx.settings.update('audit-rollback', { logCalls: true }, first.revision), (error) => error.code === 'SETTINGS_CONFLICT')
   await assert.rejects(ctx.settings.update('audit-rollback', { captureMaxBytes: 0 }, current.revision))
   await assert.rejects(ctx.settings.update('audit-rollback', { stateDir: join(rootDir, 'other') }, current.revision), /not volatile/)
-  await assert.rejects(ctx.settings.update('audit-rollback', { gitSnapshot: true }, current.revision), /not volatile/)
+  // 阶段 B：枚举与非负整数的后端校验；gitSnapshot 已是可编辑的 volatile 字段。
+  await assert.rejects(ctx.settings.update('audit-rollback', { snapshotMode: 'per-hour' }, current.revision))
+  await assert.rejects(ctx.settings.update('audit-rollback', { rollbackOnAbort: 'sometimes' }, current.revision))
+  await assert.rejects(ctx.settings.update('audit-rollback', { snapshotRetentionDays: -1 }, current.revision))
   assert.equal(readFileSync(patchPath, 'utf8'), stable, 'conflict/validation/read-only failure must not persist')
   assert.equal(entry.fiber, fiber)
-  console.log('通过 stale revision conflict / backend validation / ordinary fields refusal / no persistence on error')
+  console.log('通过 stale revision conflict / backend validation (enum & non-negative) / ordinary fields refusal / no persistence on error')
+  // 新字段可写且 .get() 实时反映；gitSnapshot 写 true 再写回 false，不落在任何轮次事件之间。
+  await ctx.settings.update('audit-rollback', { gitSnapshot: true, snapshotMode: 'per-turn', snapshotMaxFiles: 42, snapshotRetentionDays: 0, rollbackOnAbort: 'off' }, current.revision)
+  assert.equal(fiber.config.gitSnapshot.get(), true)
+  assert.equal(fiber.config.snapshotMode.get(), 'per-turn')
+  assert.equal(fiber.config.snapshotMaxFiles.get(), 42)
+  assert.equal(fiber.config.snapshotRetentionDays.get(), 0)
+  assert.equal(fiber.config.rollbackOnAbort.get(), 'off')
+  assert.equal(audit.queryAuditStatus(fiber.ctx).config.gitSnapshot, true)
+  assert.equal(audit.queryAuditStatus(fiber.ctx).config.snapshotMode, 'per-turn')
+  await ctx.settings.update('audit-rollback', { gitSnapshot: false, snapshotMode: 'per-step', snapshotMaxFiles: 50000, snapshotRetentionDays: 14, rollbackOnAbort: 'prompt' }, form().revision)
+  assert.equal(fiber.config.gitSnapshot.get(), false)
+  console.log('通过 phase-B fields writable via official update / volatile .get reflects writes / status config passthrough')
   await ctx.settings.update('audit-rollback', { captureTools: ['write'], captureMaxBytes: 1, logCalls: true, excludeGlobs: [] }, form().revision)
   start(3)
   await edit('large')

@@ -94,6 +94,27 @@ ok('假 ctx 回显账本、objects、capture 与配置', () => {
   assert.equal(status.config.logCalls, false)
   assert.deepEqual(status.config.excludeGlobs, ['/custom/'])
   assert.equal(status.config.gitSnapshot, true)
+  // ---- 阶段 B（B2b）：账本新 kind、影子库概览与快照统计 ----
+  assert.equal(status.ledger.byKind.snapshot, 0)
+  assert.equal(status.ledger.byKind.attribution, 0)
+  assert.equal(status.ledger.byKind.abort, 0)
+  assert.equal(status.shadow.enabled, true, '合成配置里 gitSnapshot=true，影子库应显示为启用')
+  assert.equal(status.shadow.workspaceKey, null, '合成账本没有 root 字段 → workspaceKey 为 null（不猜）')
+  assert.equal(status.shadow.objects, 0)
+  assert.equal(status.shadow.refs, 0)
+  assert.equal(status.snapshotStats.boundaries, 0)
+  assert.equal(status.snapshotStats.lastTurn, null)
+  assert.equal(status.snapshotStats.lastStep, null)
+  assert.equal(status.config.snapshotMode, 'per-step')
+  assert.deepEqual(status.config.snapshotExcludeGlobs, ['/node_modules/', '/.git/', '/.dsh-memory/', '/.graphflow-cache/', '/audit-rollback/'])
+  assert.equal(status.config.snapshotIgnorePolicy, 'git')
+  assert.equal(status.config.snapshotMaxFiles, 50000)
+  assert.equal(status.config.snapshotMaxBytes, 536870912)
+  assert.equal(status.config.snapshotScanMs, 5000)
+  assert.equal(status.config.snapshotTimeoutMs, 10000)
+  assert.equal(status.config.snapshotAutoExcludeOversized, false)
+  assert.equal(status.config.rollbackOnAbort, 'prompt')
+  assert.equal(status.config.snapshotRetentionDays, 14)
   console.log(JSON.stringify({
     stateDir: status.state.stateDir,
     version: status.state.version,
