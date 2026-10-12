@@ -29,6 +29,18 @@ jobs:
         with:
           node-version: 24
 
+      # Hosted Windows 的 TEMP 可能含 RUNNER~1；测试使用真实长路径，不放宽生产路径守卫。
+      - name: Canonicalize Windows test temporary directory
+        if: runner.os == 'Windows'
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, realpathSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          const canonical = realpathSync.native(tmpdir());
+          appendFileSync(process.env.GITHUB_ENV, `TEMP=${canonical}\nTMP=${canonical}\n`);
+          console.log(`Canonical Windows test temp: ${canonical}`);
+          NODE
+
       # 仅隔离 CI 工作区：官方 API 测试依赖；不运行第三方安装脚本。
       - name: Install test dependencies without lifecycle scripts
         run: npm install --ignore-scripts --no-audit --no-fund

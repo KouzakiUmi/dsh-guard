@@ -120,4 +120,24 @@ test('工作流静态门禁：版本 tag/OIDC/跨 tag 串行与双平台验收',
     assert.match(workflow, /persist-credentials: false/)
   }
 })
+test('Windows CI 短路径临时目录转真实长路径，生产路径守卫不变', () => {
+  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const block = ci.match(/- name: Canonicalize Windows test temporary directory\n\s+if: runner\.os == 'Windows'\n\s+run: \|\n\s+node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/)
+  assert(block, '必须只对 Windows 执行规范化临时目录步骤')
+  const short = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp'
+  const canonical = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp'
+  const writes = []
+  runInNewContext(block[1].replace(/^\s*import .* from 'node:[^']+';\s*$/gm, ''), {
+    realpathSync: { native(path) { assert.equal(path, short); return canonical } },
+    tmpdir: () => short,
+    appendFileSync: (path, data) => writes.push({ path, data }),
+    process: { env: { GITHUB_ENV: 'fixture-env' } },
+    console: { log() {} },
+  })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].path, 'fixture-env')
+  assert.equal(writes[0].data, `TEMP=${canonical}\nTMP=${canonical}\n`)
+  const ledger = readFileSync(new URL('../packages/dsh-audit-rollback/lib/ledger.js', import.meta.url), 'utf8')
+  assert.match(ledger, /if \(!equal\) throw new Error\('PATH_REDIRECTION'\)/)
+})
 console.log(`发布隔离测试：${passed}/${passed} 通过`)
